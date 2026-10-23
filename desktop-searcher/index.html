@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self'; script-src 'self'; img-src 'self' data:">
+    <title>Nightjar Searcher</title>
+    <link rel="stylesheet" href="./style.css">
+    <script src="./renderer.js" defer></script>
+  </head>
+  <body>
+    <header class="toolbar">
+      <a class="brand" href="#" aria-label="Nightjar Searcher home"><span class="brand-mark">n.</span><span>nightjar<span class="brand-dot">.</span></span></a>
+      <nav class="navigation" aria-label="Page navigation">
+        <button id="back" class="icon-button" type="button" aria-label="Go back" title="Back" disabled>←</button>
+        <button id="forward" class="icon-button" type="button" aria-label="Go forward" title="Forward" disabled>→</button>
+        <button id="reload" class="icon-button" type="button" aria-label="Reload page" title="Reload">↻</button>
+        <button id="home" class="icon-button" type="button" aria-label="Home" title="Home">⌂</button>
+      </nav>
+      <form id="address-form" class="address-form">
+        <label class="visually-hidden" for="provider">Search engine</label>
+        <select id="provider" aria-label="Search engine">
+          <option value="bing">Bing</option>
+          <option value="google">Google</option>
+          <option value="duckduckgo" selected>DuckDuckGo</option>
+          <option value="brave">Brave</option>
+          <option value="yandex">Yandex</option>
+        </select>
+        <span class="address-divider" aria-hidden="true"></span>
+        <label class="visually-hidden" for="address">Search or enter address</label>
+        <input id="address" type="text" placeholder="Search or enter a website address" autocomplete="off" spellcheck="false" autofocus>
+        <button class="go-button" type="submit" aria-label="Search or go">↵</button>
+      </form>
+    </header>
+    <div id="loading" class="loading" aria-hidden="true"></div>
+    <div id="notice" class="notice" role="status" aria-live="polite"></div>
+    <footer class="status"><span id="page-title">Ready when you are</span><span id="engine-label">LOCAL CHROMIUM</span></footer>
+  </body>
+</html>

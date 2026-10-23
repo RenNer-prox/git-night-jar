@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Nightjar browsing engine</title>
+    <link rel="stylesheet" href="/proxy-shell.css">
+    <script src="/scram/scramjet.all.js"></script>
+    <script type="importmap">{"imports":{"@mercuryworkshop/bare-mux":"/baremux/index.mjs"}}</script>
+    <script type="module" src="/dist/proxy-shell.js"></script>
+  </head>
+  <body>
+    <main id="browsing-surface" aria-live="off"></main>
+    <div id="engine-status" role="status" aria-live="polite">Preparing private browsing…</div>
+  </body>
+</html>

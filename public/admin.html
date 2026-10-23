@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark light">
+    <meta name="theme-color" content="#101111">
+    <title>Nightjar Owner Console</title>
+    <link rel="icon" href="/mark.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="/styles.css">
+    <link rel="stylesheet" href="/admin.css">
+    <script src="/admin.js" type="module"></script>
+  </head>
+  <body>
+    <div class="cursor-orb" aria-hidden="true"></div>
+    <main id="admin-app" class="admin-shell">
+      <section id="admin-signin" class="signin-view">
+        <div class="signin-card admin-signin-card">
+          <a class="brand brand-large" href="/" aria-label="Nightjar browser"><span class="brand-mark"><svg viewBox="0 0 32 32"><path d="M23.9 5.1c-6.7-2.4-14.3.6-17.3 6.9-2.5 5.1-.6 11.1 4.2 14.1 3.8 2.4 9.1 1.3 10.8-2.7 1-2.2.2-4.8-1.8-5.8-1.8-1-4.1-.3-4.8 1.4-.5 1.2.1 2.5 1.2 2.9-2.9.7-5.8-1.4-6-4.5-.3-4 3-7.7 7.3-8.1 3.1-.3 5.7.8 7.6 2.6-.2-2.6-.6-4.9-1.2-6.8Z"/></svg></span><span>nightjar<span class="brand-dot">.</span></span></a>
+          <p class="eyebrow">PRIVATE OWNER CONSOLE</p>
+          <h1>Administrator sign-in.</h1>
+          <p class="muted signin-copy">This console is separate from browser accounts and requires the owner password.</p>
+          <form id="admin-login-form" class="stack-form">
+            <label for="admin-password">Owner password</label>
+            <input id="admin-password" type="password" autocomplete="current-password" required minlength="16">
+            <label for="admin-totp">Authenticator code <span class="muted">(if enabled)</span></label>
+            <input id="admin-totp" type="text" inputmode="numeric" pattern="[0-9]{6}" autocomplete="one-time-code" maxlength="6" placeholder="6-digit code">
+            <button class="primary-button full-button" type="submit">Unlock owner console <span aria-hidden="true">↗</span></button>
+            <p id="admin-login-error" class="form-error" role="alert" hidden></p>
+          </form>
+          <div class="signin-foot"><span class="status-dot"></span> Owner-only access <span class="sep-dot">·</span><a href="/" class="text-link">Return to browser</a></div>
+        </div>
+      </section>
+
+      <section id="admin-console" class="admin-console" hidden>
+        <header class="admin-topbar">
+          <div class="admin-brand">
+            <a class="brand" href="/" aria-label="Return to browser"><span class="brand-mark"><svg viewBox="0 0 32 32"><path d="M23.9 5.1c-6.7-2.4-14.3.6-17.3 6.9-2.5 5.1-.6 11.1 4.2 14.1 3.8 2.4 9.1 1.3 10.8-2.7 1-2.2.2-4.8-1.8-5.8-1.8-1-4.1-.3-4.8 1.4-.5 1.2.1 2.5 1.2 2.9-2.9.7-5.8-1.4-6-4.5-.3-4 3-7.7 7.3-8.1 3.1-.3 5.7.8 7.6 2.6-.2-2.6-.6-4.9-1.2-6.8Z"/></svg></span><span>nightjar<span class="brand-dot">.</span></span></a>
+            <span class="admin-divider"></span><span class="admin-console-label">Owner console</span>
+          </div>
+          <div class="admin-top-actions"><span class="admin-owner-badge"><span class="status-dot"></span> OWNER</span><button id="admin-logout" class="secondary-button" type="button">Lock console</button></div>
+        </header>
+        <div class="admin-layout">
+          <aside class="admin-rail" aria-label="Owner console sections">
+            <button class="rail-item selected" data-panel="overview" type="button"><span>◈</span> Overview</button>
+            <button class="rail-item" data-panel="accounts" type="button"><span>◇</span> Accounts</button>
+            <button class="rail-item" data-panel="invitations" type="button"><span>⌁</span> Invitations</button>
+            <button class="rail-item" data-panel="sessions" type="button"><span>◉</span> Sessions</button>
+            <button class="rail-item" data-panel="site-controls" type="button"><span>⚙</span> Site controls</button>
+            <button class="rail-item" data-panel="support" type="button"><span>✦</span> Support & ideas</button>
+            <button class="rail-item" data-panel="audit" type="button"><span>≡</span> Audit log</button>
+            <div class="rail-spacer"></div>
+            <a class="rail-item" href="/" target="_self"><span>↗</span> Browser</a>
+          </aside>
+          <div class="admin-content">
+            <section class="admin-panel" data-panel-content="overview">
+              <div class="admin-page-heading"><div><p class="eyebrow">PRIVATE BY DESIGN</p><h1>Overview</h1><p>Monitor the private workspace and its access controls.</p></div><span id="health-indicator" class="health-chip"><span class="status-dot"></span> Service online</span></div>
+              <div class="metric-grid" id="metrics"></div>
+              <div class="admin-section-card">
+                <div class="section-title"><div><h2>Access posture</h2><p>Current security and deployment boundary.</p></div></div>
+                <div class="security-grid" id="security-grid"></div>
+              </div>
+              <div class="admin-section-card">
+                <div class="section-title"><div><h2>Workspace usage</h2><p>Aggregate entries currently retained in the database.</p></div></div>
+                <div id="usage-stats" class="usage-strip"></div>
+              </div>
+              <div class="admin-section-card">
+                <div class="section-title"><div><h2>Recent activity</h2><p>Latest owner and session events.</p></div><button class="text-button" data-go-panel="audit" type="button">View audit log <span>→</span></button></div>
+                <div id="recent-activity"></div>
+              </div>
+            </section>
+            <section class="admin-panel" data-panel-content="invitations" hidden>
+              <div class="admin-page-heading"><div><p class="eyebrow">CONTROLLED ACCESS</p><h1>Invitations</h1><p>Tokens are shown only once and stored as SHA-256 hashes.</p></div><button id="create-invite" class="primary-button" type="button"><span>＋</span> Create invitation</button></div>
+              <div class="admin-section-card table-card"><div class="section-title"><div><h2>Issued tokens</h2><p>Each invitation can be redeemed once; the account stays signed in with its secure session cookie.</p></div><button id="refresh-tokens" class="icon-button" title="Refresh" aria-label="Refresh invitations">↻</button></div><div id="token-table"></div></div>
+              <div class="admin-section-card table-card"><div class="section-title"><div><h2>Access ranks</h2><p>Reusable permission presets. Existing accounts keep their saved grants when a rank is removed.</p></div><button id="create-rank" class="secondary-button" type="button">＋ New rank</button></div><div id="rank-table"></div></div>
+            </section>
+            <section class="admin-panel" data-panel-content="accounts" hidden>
+              <div class="admin-page-heading"><div><p class="eyebrow">ACCOUNT ACCESS</p><h1>Accounts</h1><p>Edit individual grants and preferences, or revoke an account and all its invitations.</p></div><button id="refresh-accounts" class="secondary-button" type="button">Refresh</button></div>
+              <div class="admin-section-card table-card"><div id="account-table"></div></div>
+            </section>
+            <section class="admin-panel" data-panel-content="site-controls" hidden>
+              <div class="admin-page-heading"><div><p class="eyebrow">GLOBAL CONFIGURATION</p><h1>Site controls</h1><p>Owner-enforced controls for the whole Nightjar workspace.</p></div><button id="save-site-controls" class="primary-button" type="button">Save controls</button></div>
+              <div class="admin-section-card">
+                <div class="section-title"><div><h2>Availability and features</h2><p>These settings are enforced by the server, not only hidden in the interface.</p></div></div>
+                <div class="site-control-list">
+                  <label class="site-control-option"><input id="control-maintenance" type="checkbox"><span><strong>Maintenance mode</strong><small>Block user sign-in and browser APIs while keeping this owner console available.</small></span></label>
+                  <label class="site-control-option"><input id="control-invitations" type="checkbox"><span><strong>Allow new invitations</strong><small>When off, both the owner console and terminal commands refuse to create invitations.</small></span></label>
+                  <label class="site-control-option"><input id="control-assistant" type="checkbox"><span><strong>Allow local AI assistant</strong><small>When off, assistant API requests are denied for every account, including AI ranks.</small></span></label>
+                </div>
+              </div>
+            </section>
+            <section class="admin-panel" data-panel-content="support" hidden>
+              <div class="admin-page-heading"><div><p class="eyebrow">PRIVATE FEEDBACK</p><h1>Support & ideas</h1><p>Messages are stored in this Nightjar database and visible only to the owner.</p></div><button id="refresh-feedback" class="secondary-button" type="button">Refresh</button></div>
+              <div class="admin-section-card table-card"><div id="feedback-table"></div></div>
+            </section>
+            <section class="admin-panel" data-panel-content="sessions" hidden>
+              <div class="admin-page-heading"><div><p class="eyebrow">LIVE AUTHORIZATION</p><h1>Active sessions</h1><p>Heartbeats expire after a short network grace period; a second valid invitation used during an active session revokes its account.</p></div><button id="refresh-sessions" class="secondary-button" type="button">Refresh</button></div>
+              <div class="admin-section-card table-card"><div id="session-table"></div></div>
+              <div class="admin-section-card desktop-card">
+                <div class="section-title"><div><h2>Linux desktop companion</h2><p>Same-PC only · owner-cookie pairing · local approval for sharing and input</p></div><span id="desktop-status" class="status-badge revoked">Not paired</span></div>
+                <div class="desktop-boundary"><span class="desktop-shield">◇</span><div><strong>Owner-cookie authorized · loopback only.</strong><p>Start the companion manually with <code>npm run companion</code>, then pair with one click while signed in to the Nightjar owner console. No pairing code is used; the owner’s HttpOnly session cookie and CSRF protection authorize a short-lived, one-use pairing ticket. The active pairing is revalidated against that signed-in owner session every 15 seconds and ends if its cookie session becomes invalid. Screen sharing and mouse/keyboard input still require separate approval in the companion terminal. This does not enable system RDP, change firewall rules, or accept shell commands.</p></div></div>
+                <div class="desktop-connect-row">
+                  <button id="desktop-pair" class="secondary-button" type="button">Pair this owner session</button>
+                </div>
+                <div class="desktop-actions">
+                  <button id="desktop-start" class="primary-button" type="button" disabled>Start screen sharing</button>
+                  <button id="desktop-enable-input" class="secondary-button" type="button" disabled>Enable mouse & keyboard</button>
+                  <button id="desktop-stop" class="danger-button" type="button" disabled>Stop sharing & disconnect</button>
+                </div>
+                <p id="desktop-message" class="desktop-message" role="status" aria-live="polite">The companion has not been paired.</p>
+                <div id="desktop-view" class="desktop-view" hidden>
+                  <img id="desktop-frame" alt="Live screen from the locally approved Linux companion">
+                  <div class="desktop-input-controls">
+                    <label class="desktop-key-field"><span class="field-label">Send a safe navigation key</span><select id="desktop-key" class="field-select"><option value="escape">Escape</option><option value="tab">Tab</option><option value="enter">Enter</option><option value="backspace">Backspace</option><option value="up">Up</option><option value="down">Down</option><option value="left">Left</option><option value="right">Right</option></select></label>
+                    <button id="desktop-send-key" class="secondary-button" type="button" disabled>Send key</button>
+                    <label class="desktop-type-field"><span class="field-label">Type text (up to 120 characters)</span><input id="desktop-text" class="field-input" type="text" maxlength="120" autocomplete="off"></label>
+                    <button id="desktop-send-text" class="secondary-button" type="button" disabled>Type text</button>
+                  </div>
+                  <p class="table-secondary">Click the screen to send a pointer click. Keyboard shortcuts and system keys are restricted. Sharing ends after one minute without an owner-console heartbeat.</p>
+                </div>
+              </div>
+            </section>
+            <section class="admin-panel" data-panel-content="audit" hidden>
+              <div class="admin-page-heading"><div><p class="eyebrow">ACCOUNTABILITY</p><h1>Audit log</h1><p>Recorded authentication, token and session actions. IPs are retained for owner review.</p></div><button id="refresh-audit" class="secondary-button" type="button">Refresh</button></div>
+              <div class="admin-section-card table-card"><div id="audit-table"></div></div>
+            </section>
+          </div>
+        </div>
+      </section>
+    </main>
+    <div id="overlay-root"></div>
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  </body>
+</html>

@@ -1,0 +1,31 @@
+{
+  "name": "nightjar-browser",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.13"
+  },
+  "dependencies": {
+    "@mercuryworkshop/bare-mux": "2.1.9",
+    "@mercuryworkshop/epoxy-transport": "3.0.2",
+    "@mercuryworkshop/scramjet": "1.1.0",
+    "@mercuryworkshop/wisp-js": "0.5.0",
+    "electron": "^45.0.0",
+    "express": "^5.1.0"
+  },
+  "scripts": {
+    "searcher": "electron desktop-searcher/main.js",
+    "build:proxy": "tsc --project tsconfig.json",
+    "start": "node server.js",
+    "prestart": "npm run build:proxy",
+    "dev": "node --watch server.js",
+    "predev": "npm run build:proxy",
+    "manage": "node admin-cli.js",
+    "companion": "python3 desktop-companion/companion.py",
+    "test": "node --test"
+  },
+  "devDependencies": {
+    "typescript": "5.9.3"
+  }
+}
