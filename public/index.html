@@ -62,18 +62,17 @@
               <button id="bookmark-current" class="address-bookmark icon-button" type="button" aria-label="Bookmark this page" title="Bookmark this page"></button>
               <span id="load-indicator" class="load-indicator" aria-hidden="true"></span>
             </form>
-            <div class="toolbar-tools">
-              <button id="bookmarks-open" class="icon-button tool-icon" aria-label="Bookmarks" title="Bookmarks"></button>
-              <button id="history-open" class="icon-button tool-icon" aria-label="Browsing history" title="History"></button>
-              <button id="downloads-open" class="icon-button tool-icon" aria-label="Downloads" title="Downloads"></button>
-              <span class="toolbar-divider"></span>
-              <button id="assistant-open" class="icon-button tool-icon" aria-label="Local AI assistant" title="Local AI assistant"></button>
-              <button id="games-open" class="icon-button tool-icon" aria-label="Math games" title="Math games"></button>
-              <button id="open-regular" class="icon-button tool-icon" aria-label="Open current page in a regular tab" title="Open current page in a regular tab" hidden></button>
-              <button id="theme-toggle" class="icon-button tool-icon" aria-label="Change appearance" title="Change appearance"></button>
-              <button id="settings-open" class="icon-button tool-icon" aria-label="Settings" title="Settings"></button>
-              <button id="help-open" class="icon-button tool-icon" aria-label="Help and keyboard shortcuts" title="Help and keyboard shortcuts"></button>
-              <a class="admin-link icon-button tool-icon" href="/admin" aria-label="Owner administration" title="Owner administration"></a>
+            <div class="toolbar-tools" id="toolbar-tools">
+              <button id="bookmarks-open" class="icon-button tool-icon" data-movable-toolbar-item draggable="false" aria-label="Bookmarks" title="Bookmarks"></button>
+              <button id="history-open" class="icon-button tool-icon" data-movable-toolbar-item draggable="false" aria-label="Browsing history" title="History"></button>
+              <button id="downloads-open" class="icon-button tool-icon" data-movable-toolbar-item draggable="false" aria-label="Downloads" title="Downloads"></button>
+              <button id="assistant-open" class="icon-button tool-icon" data-movable-toolbar-item draggable="false" aria-label="Local AI assistant" title="Local AI assistant"></button>
+              <button id="games-open" class="icon-button tool-icon" data-movable-toolbar-item draggable="false" aria-label="Math games" title="Math games"></button>
+              <button id="open-regular" class="icon-button tool-icon" data-movable-toolbar-item draggable="false" aria-label="Open current page in a regular tab" title="Open current page in a regular tab" hidden></button>
+              <button id="theme-toggle" class="icon-button tool-icon" data-movable-toolbar-item draggable="false" aria-label="Change appearance" title="Change appearance"></button>
+              <button id="settings-open" class="icon-button tool-icon" data-movable-toolbar-item draggable="false" aria-label="Settings" title="Settings"></button>
+              <button id="help-open" class="icon-button tool-icon" data-movable-toolbar-item draggable="false" aria-label="Help and keyboard shortcuts" title="Help and keyboard shortcuts"></button>
+              <a id="admin-link" class="admin-link icon-button tool-icon" data-movable-toolbar-item draggable="false" href="/admin" aria-label="Owner administration" title="Owner administration" hidden></a>
             </div>
           </div>
           <div class="bookmark-bar" id="bookmark-bar" aria-label="Bookmark shortcuts"></div>
@@ -92,6 +91,10 @@
                 <kbd>↵</kbd>
               </form>
               <div class="quick-links" id="quick-links"></div>
+              <section class="project-areas-card" id="project-areas-card" aria-labelledby="project-areas-title">
+                <div class="project-areas-heading"><div><span class="project-area-eyebrow">PRIVATE WORKSPACES</span><h2 id="project-areas-title">Project areas</h2></div><button id="project-area-create" class="secondary-button" type="button">＋ Add area</button></div>
+                <div id="project-area-list" class="project-area-list"><p class="muted">Loading your private areas…</p></div>
+              </section>
               <div class="home-footer"><span class="status-dot"></span><span>Protected by your private workspace</span><span class="sep-dot">·</span><span id="home-date"></span></div>
             </div>
           </div>

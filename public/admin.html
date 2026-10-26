@@ -44,6 +44,7 @@
           <aside class="admin-rail" aria-label="Owner console sections">
             <button class="rail-item selected" data-panel="overview" type="button"><span>◈</span> Overview</button>
             <button class="rail-item" data-panel="accounts" type="button"><span>◇</span> Accounts</button>
+            <button class="rail-item" data-panel="friends" type="button"><span>♡</span> Friends</button>
             <button class="rail-item" data-panel="invitations" type="button"><span>⌁</span> Invitations</button>
             <button class="rail-item" data-panel="sessions" type="button"><span>◉</span> Sessions</button>
             <button class="rail-item" data-panel="site-controls" type="button"><span>⚙</span> Site controls</button>
@@ -77,6 +78,10 @@
             <section class="admin-panel" data-panel-content="accounts" hidden>
               <div class="admin-page-heading"><div><p class="eyebrow">ACCOUNT ACCESS</p><h1>Accounts</h1><p>Edit individual grants and preferences, or revoke an account and all its invitations.</p></div><button id="refresh-accounts" class="secondary-button" type="button">Refresh</button></div>
               <div class="admin-section-card table-card"><div id="account-table"></div></div>
+            </section>
+            <section class="admin-panel" data-panel-content="friends" hidden>
+              <div class="admin-page-heading"><div><p class="eyebrow">PEOPLE YOU INVITE</p><h1>Friends</h1><p>Add people one at a time. Each friend signs in with their own account and private project areas; friends do not receive owner access automatically.</p></div><button id="add-friend" class="primary-button" type="button"><span>＋</span> Add friend</button></div>
+              <div class="admin-section-card table-card"><div class="section-title"><div><h2>Friend list</h2><p>Start with one person and add more whenever you choose. Removing someone here does not revoke their account.</p></div><button id="refresh-friends" class="icon-button" title="Refresh" aria-label="Refresh friends">↻</button></div><div id="friend-list"></div></div>
             </section>
             <section class="admin-panel" data-panel-content="site-controls" hidden>
               <div class="admin-page-heading"><div><p class="eyebrow">GLOBAL CONFIGURATION</p><h1>Site controls</h1><p>Owner-enforced controls for the whole Nightjar workspace.</p></div><button id="save-site-controls" class="primary-button" type="button">Save controls</button></div>

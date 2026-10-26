@@ -29,18 +29,22 @@ const SESSION_MAX_AGE_MS = 12 * 60 * 60 * 1000;
 const SESSION_IDLE_MS = SESSION_MAX_AGE_MS;
 const PERMISSIONS = ["browse", "bookmarks", "history", "settings", "assistant", "games", "support"];
 const FEATURES = ["bookmarks", "history", "settings", "assistant", "games", "support"];
+const BASIC_AI_REQUEST_LIMIT = 20;
+const LIMITED_AI_RANKS = new Set(["basic", "basic-plus"]);
+const CUSTOMIZABLE_TOOLBAR_ITEMS = ["bookmarks-open", "history-open", "downloads-open", "assistant-open", "games-open", "open-regular", "theme-toggle", "settings-open", "help-open", "admin-link"];
 const DEFAULT_SITE_CONTROLS = {
   maintenanceMode: false,
   invitationsEnabled: true,
   assistantEnabled: true,
 };
 const DEFAULT_RANKS = [
-  { id: "basic", label: "Basic", permissions: ["browse", "support"], features: ["support"] },
-  { id: "standard", label: "Standard", permissions: ["browse", "bookmarks", "history", "settings", "games", "support"], features: ["bookmarks", "history", "settings", "games", "support"] },
-  { id: "full", label: "Full", permissions: PERMISSIONS, features: FEATURES },
-  { id: "without-ai", label: "Without AI", permissions: ["browse", "bookmarks", "history", "settings", "games", "support"], features: ["bookmarks", "history", "settings", "games", "support"] },
-  { id: "with-ai", label: "With AI", permissions: PERMISSIONS, features: FEATURES },
+  { id: "basic", label: "Basic", permissions: ["browse", "assistant"], features: ["assistant"] },
+  { id: "basic-plus", label: "Basic+", permissions: ["browse", "bookmarks", "history", "assistant"], features: ["bookmarks", "history", "assistant"] },
+  { id: "ai", label: "AI", permissions: ["browse", "bookmarks", "history", "assistant"], features: ["bookmarks", "history", "assistant"] },
+  { id: "full-minus", label: "Full-", permissions: ["browse", "bookmarks", "history", "settings", "assistant", "games", "support"], features: ["bookmarks", "history", "settings", "assistant", "games", "support"] },
+  { id: "owner", label: "Owner", permissions: ["browse", "bookmarks", "history", "settings", "assistant", "games", "support"], features: ["bookmarks", "history", "settings", "assistant", "games", "support"] },
 ];
+const BUILT_IN_RANK_IDS = new Set(DEFAULT_RANKS.map(({ id }) => id));
 const DEFAULT_SETTINGS = {
   theme: "dark",
   accent: "#ff7048",
@@ -48,6 +52,9 @@ const DEFAULT_SETTINGS = {
   homepage: "home",
   searchProvider: "duckduckgo",
   customCursor: true,
+  customTitle: "",
+  customIcon: "",
+  toolbarOrder: CUSTOMIZABLE_TOOLBAR_ITEMS,
   privacy: { suppressReferrer: true, clearOnExit: false },
 };
 const SEARCH_PROVIDERS = {
@@ -226,7 +233,12 @@ function verifyTotp(secret, candidate, now = Date.now()) {
 }
 
 function normalizeSettings(input = {}, current = DEFAULT_SETTINGS) {
-  const settings = { ...current, ...input, privacy: { ...current.privacy, ...(input.privacy ?? {}) } };
+  const settings = {
+    ...DEFAULT_SETTINGS,
+    ...current,
+    ...input,
+    privacy: { ...DEFAULT_SETTINGS.privacy, ...current.privacy, ...(input.privacy ?? {}) },
+  };
   if (!["dark", "light", "system"].includes(settings.theme)) throw new HttpError(400, "Choose a supported theme.");
   if (!/^#[0-9a-f]{6}$/i.test(settings.accent)) throw new HttpError(400, "Accent must be a six-digit hex color.");
   if (!["compact", "comfortable", "spacious"].includes(settings.density)) throw new HttpError(400, "Choose a supported interface density.");
@@ -235,6 +247,18 @@ function normalizeSettings(input = {}, current = DEFAULT_SETTINGS) {
   if (!Object.hasOwn(SEARCH_PROVIDERS, settings.searchProvider)) throw new HttpError(400, "Choose a supported search provider.");
   if (typeof settings.customCursor !== "boolean" || typeof settings.privacy.suppressReferrer !== "boolean" || typeof settings.privacy.clearOnExit !== "boolean") {
     throw new HttpError(400, "Settings contain an invalid toggle.");
+  }
+  if (typeof settings.customTitle !== "string" || settings.customTitle.length > 60 || /[\u0000-\u001f]/.test(settings.customTitle)) {
+    throw new HttpError(400, "Custom title must be at most 60 characters.");
+  }
+  if (typeof settings.customIcon !== "string" || [...settings.customIcon].length > 4 || /[\u0000-\u001f]/.test(settings.customIcon)) {
+    throw new HttpError(400, "Custom tab icon must be at most four printable characters.");
+  }
+  if (!Array.isArray(settings.toolbarOrder)
+    || settings.toolbarOrder.length !== CUSTOMIZABLE_TOOLBAR_ITEMS.length
+    || new Set(settings.toolbarOrder).size !== CUSTOMIZABLE_TOOLBAR_ITEMS.length
+    || settings.toolbarOrder.some((item) => !CUSTOMIZABLE_TOOLBAR_ITEMS.includes(item))) {
+    throw new HttpError(400, "Toolbar layout is invalid.");
   }
   return settings;
 }
@@ -333,7 +357,8 @@ function createDatabase(path) {
       settings_json TEXT NOT NULL,
       permissions_json TEXT NOT NULL,
       features_json TEXT NOT NULL,
-      rank TEXT NOT NULL DEFAULT 'standard',
+      rank TEXT NOT NULL DEFAULT 'basic-plus',
+      is_friend INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL,
       revoked_at TEXT
     );
@@ -350,10 +375,11 @@ function createDatabase(path) {
       token_hash TEXT NOT NULL UNIQUE,
       label TEXT NOT NULL,
       permissions_json TEXT NOT NULL,
-      rank TEXT NOT NULL DEFAULT 'standard',
+      rank TEXT NOT NULL DEFAULT 'basic-plus',
       expires_at TEXT,
       usage_limit INTEGER,
       usage_count INTEGER NOT NULL DEFAULT 0,
+      ai_usage_count INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL,
       last_used_at TEXT,
       revoked_at TEXT
@@ -405,6 +431,16 @@ function createDatabase(path) {
       created_at TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS feedback_by_time ON feedback(created_at DESC);
+    CREATE TABLE IF NOT EXISTS project_areas (
+      id TEXT PRIMARY KEY,
+      account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+      name TEXT NOT NULL,
+      kind TEXT NOT NULL CHECK (kind IN ('proxy', 'games', 'custom')),
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE(account_id, name)
+    );
+    CREATE INDEX IF NOT EXISTS project_areas_by_account ON project_areas(account_id, created_at DESC);
     CREATE TABLE IF NOT EXISTS site_settings (
       key TEXT PRIMARY KEY,
       value_json TEXT NOT NULL,
@@ -427,6 +463,9 @@ function createDatabase(path) {
   if (!accountColumns.has("rank")) db.exec("ALTER TABLE accounts ADD COLUMN rank TEXT NOT NULL DEFAULT 'standard'");
   const tokenColumns = new Set(db.prepare("PRAGMA table_info(tokens)").all().map((column) => column.name));
   if (!tokenColumns.has("rank")) db.exec("ALTER TABLE tokens ADD COLUMN rank TEXT NOT NULL DEFAULT 'standard'");
+  if (!tokenColumns.has("ai_usage_count")) db.exec("ALTER TABLE tokens ADD COLUMN ai_usage_count INTEGER NOT NULL DEFAULT 0");
+  const friendColumns = new Set(db.prepare("PRAGMA table_info(accounts)").all().map((column) => column.name));
+  if (!friendColumns.has("is_friend")) db.exec("ALTER TABLE accounts ADD COLUMN is_friend INTEGER NOT NULL DEFAULT 0");
   if (!db.prepare("SELECT version FROM schema_migrations WHERE version = 3").get()) {
     const insertRank = db.prepare("INSERT OR IGNORE INTO ranks(id, label, permissions_json, features_json, created_at) VALUES (?, ?, ?, ?, ?)");
     for (const rank of DEFAULT_RANKS) {
@@ -451,6 +490,67 @@ function createDatabase(path) {
       INSERT INTO schema_migrations(version, applied_at) VALUES (6, CURRENT_TIMESTAMP);
       COMMIT;
     `);
+  }
+  if (!db.prepare("SELECT version FROM schema_migrations WHERE version = 7").get()) {
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      const legacyOwner = db.prepare("SELECT id FROM ranks WHERE id = 'owner'").get();
+      if (legacyOwner) {
+        let safeId = "legacy-owner";
+        let suffix = 1;
+        while (db.prepare("SELECT id FROM ranks WHERE id = ?").get(safeId)) {
+          safeId = `legacy-owner-${suffix}`;
+          suffix += 1;
+        }
+        db.prepare("UPDATE accounts SET rank = ? WHERE rank = 'owner'").run(safeId);
+        db.prepare("UPDATE tokens SET rank = ? WHERE rank = 'owner'").run(safeId);
+        db.prepare("UPDATE ranks SET id = ?, label = ? WHERE id = 'owner'").run(safeId, "Legacy owner preset");
+      }
+      const migrations = [
+        ["standard", DEFAULT_RANKS.find(({ id }) => id === "basic-plus")],
+        ["without-ai", DEFAULT_RANKS.find(({ id }) => id === "basic-plus")],
+        ["with-ai", DEFAULT_RANKS.find(({ id }) => id === "ai")],
+        ["full", DEFAULT_RANKS.find(({ id }) => id === "full-minus")],
+      ];
+      for (const [oldId, rank] of migrations) {
+        db.prepare("UPDATE accounts SET rank = ?, permissions_json = ?, features_json = ? WHERE rank = ?")
+          .run(rank.id, JSON.stringify(rank.permissions), JSON.stringify(rank.features), oldId);
+        db.prepare("UPDATE tokens SET rank = ?, permissions_json = ? WHERE rank = ?")
+          .run(rank.id, JSON.stringify(rank.permissions), oldId);
+        db.prepare("DELETE FROM ranks WHERE id = ?").run(oldId);
+      }
+      const upsertRank = db.prepare(`INSERT INTO ranks(id, label, permissions_json, features_json, created_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET label = excluded.label,
+          permissions_json = excluded.permissions_json, features_json = excluded.features_json`);
+      for (const rank of DEFAULT_RANKS) {
+        const labelConflict = db.prepare("SELECT id FROM ranks WHERE label = ? AND id != ?").get(rank.label, rank.id);
+        if (labelConflict) {
+          let legacyLabel = `${rank.label} (legacy)`;
+          let suffix = 1;
+          while (db.prepare("SELECT id FROM ranks WHERE label = ?").get(legacyLabel)) {
+            legacyLabel = `${rank.label} (legacy ${suffix})`;
+            suffix += 1;
+          }
+          db.prepare("UPDATE ranks SET label = ? WHERE id = ?").run(legacyLabel, labelConflict.id);
+        }
+        upsertRank.run(rank.id, rank.label, JSON.stringify(rank.permissions), JSON.stringify(rank.features), new Date().toISOString());
+        db.prepare("UPDATE accounts SET permissions_json = ?, features_json = ? WHERE rank = ?")
+          .run(JSON.stringify(rank.permissions), JSON.stringify(rank.features), rank.id);
+        db.prepare("UPDATE tokens SET permissions_json = ? WHERE rank = ?")
+          .run(JSON.stringify(rank.permissions), rank.id);
+      }
+      db.prepare("INSERT INTO schema_migrations(version, applied_at) VALUES (7, CURRENT_TIMESTAMP)").run();
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+  if (!db.prepare("SELECT version FROM schema_migrations WHERE version = 8").get()) {
+    const createdAt = new Date().toISOString();
+    for (const account of db.prepare("SELECT id FROM accounts").all()) createDefaultProjectAreas(db, account.id, createdAt);
+    db.prepare("INSERT INTO schema_migrations(version, applied_at) VALUES (8, CURRENT_TIMESTAMP)").run();
   }
   return db;
 }
@@ -565,6 +665,7 @@ export async function runAdminCommand(args, options = {}) {
     if (resource === "ranks" && action === "delete" && positional.length === 3) {
       const count = db.prepare("SELECT COUNT(*) AS count FROM ranks").get().count;
       if (count <= 1) throw new Error("Keep at least one rank so new invitations can still be issued.");
+      if (BUILT_IN_RANK_IDS.has(identifier)) throw new Error("Built-in access ranks cannot be removed.");
       const result = db.prepare("DELETE FROM ranks WHERE id = ?").run(identifier);
       if (!result.changes) throw new Error("Rank not found.");
       audit(db, "owner-cli", "rank.deleted", identifier, {}, "local-cli");
@@ -596,7 +697,7 @@ export async function runAdminCommand(args, options = {}) {
       const existingAccount = db.prepare("SELECT * FROM accounts WHERE id = ?").get(accountId);
       if (flags["account-id"] && !existingAccount) throw new Error("That account ID was not found.");
       if (existingAccount?.revoked_at) throw new Error("Revoked accounts cannot receive replacement invitations.");
-      let rankId = flags.rank ?? positional[3] ?? existingAccount?.rank ?? "standard";
+      let rankId = flags.rank ?? positional[3] ?? existingAccount?.rank ?? "basic-plus";
       let rank = db.prepare("SELECT * FROM ranks WHERE id = ?").get(rankId);
       if (!rank && existingAccount && !flags.rank && !positional[3]) {
         rank = { permissions_json: existingAccount.permissions_json, features_json: existingAccount.features_json };
@@ -618,9 +719,13 @@ export async function runAdminCommand(args, options = {}) {
         if (existingAccount) {
           db.prepare("UPDATE accounts SET label = ?, permissions_json = ?, features_json = ?, rank = ? WHERE id = ?")
             .run(accountLabel, JSON.stringify(permissions), JSON.stringify(features), rankId, accountId);
+          db.prepare("UPDATE tokens SET rank = ?, permissions_json = ? WHERE account_id = ?")
+            .run(rankId, JSON.stringify(permissions), accountId);
         } else {
           db.prepare("INSERT INTO accounts(id, label, settings_json, permissions_json, features_json, rank, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
             .run(accountId, accountLabel, JSON.stringify(settings), JSON.stringify(permissions), JSON.stringify(features), rankId, now);
+          createDefaultProjectAreas(db, accountId, now);
+          createDefaultProjectAreas(db, accountId, now);
         }
         db.prepare(`INSERT INTO tokens(id, account_id, token_hash, label, permissions_json, rank, expires_at, usage_limit, created_at)
           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
@@ -673,6 +778,13 @@ function audit(db, actor, action, subject, detail, ip) {
     .run(randomUUID(), actor, action, subject, JSON.stringify(detail), ip, new Date().toISOString());
 }
 
+function createDefaultProjectAreas(db, accountId, now = new Date().toISOString()) {
+  const insert = db.prepare(`INSERT OR IGNORE INTO project_areas(id, account_id, name, kind, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?)`);
+  insert.run(randomUUID(), accountId, "Proxy", "proxy", now, now);
+  insert.run(randomUUID(), accountId, "games", "games", now, now);
+}
+
 function rowToToken(row) {
   return {
     id: row.id,
@@ -684,6 +796,8 @@ function rowToToken(row) {
     expiresAt: row.expires_at,
     usageLimit: row.usage_limit,
     usageCount: row.usage_count,
+    aiUsageLimit: LIMITED_AI_RANKS.has(row.rank) ? BASIC_AI_REQUEST_LIMIT : null,
+    aiUsageCount: row.ai_usage_count ?? 0,
     createdAt: row.created_at,
     lastUsedAt: row.last_used_at,
     revokedAt: row.revoked_at,
@@ -745,6 +859,7 @@ export async function createApp(options = {}) {
   }
 
   const rateLimits = new Map();
+  const userLoginLimit = options.userLoginLimit ?? 12;
   let activeAiRequests = 0;
   const config = {
     secureCookie: options.secureCookie ?? env("NODE_ENV", "development") === "production",
@@ -753,6 +868,11 @@ export async function createApp(options = {}) {
   const proxyHost = options.proxyHost ?? env("RAMMERHEAD_HOST", env("SCRAMJET_HOST", "127.0.0.1"));
   const configuredProxyOrigin = options.proxyOrigin ?? env("RAMMERHEAD_ORIGIN", env("SCRAMJET_ORIGIN", ""));
   const configuredAppOrigin = options.appOrigin ?? env("APP_ORIGIN", "");
+  const configuredDashboardOrigins = options.dashboardOrigins ?? env("DASHBOARD_ORIGINS", "");
+  const dashboardOriginsInput = Array.isArray(configuredDashboardOrigins)
+    ? configuredDashboardOrigins
+    : String(configuredDashboardOrigins).split(",");
+  const dashboardOrigins = new Set(dashboardOriginsInput.map((origin) => String(origin).trim()).filter(Boolean));
   const proxyPort = Number(options.proxyPort ?? env("RAMMERHEAD_PORT", env("SCRAMJET_PORT", "4174")));
   if (!Number.isInteger(proxyPort) || proxyPort < 0 || proxyPort > 65535) {
     db.close();
@@ -766,6 +886,16 @@ export async function createApp(options = {}) {
     } catch {
       db.close();
       throw new Error(`${name} must be a bare HTTP(S) origin with no path.`);
+    }
+  }
+  for (const value of dashboardOrigins) {
+    try {
+      const parsed = new URL(value);
+      if (!["http:", "https:"].includes(parsed.protocol) || parsed.origin !== value || value === "*") throw new Error();
+      if ((options.production ?? env("NODE_ENV", "development") === "production") && parsed.protocol !== "https:") throw new Error();
+    } catch {
+      db.close();
+      throw new Error("DASHBOARD_ORIGINS must be a comma-separated list of exact HTTP(S) origins; production origins must use HTTPS.");
     }
   }
   if ((options.production ?? env("NODE_ENV", "development") === "production") && !configuredProxyOrigin) {
@@ -945,35 +1075,50 @@ export async function createApp(options = {}) {
   }
 
   function requestSession(req) {
-    const isAdminRequest = req.url?.startsWith("/api/admin/");
-    const cookieName = isAdminRequest ? ADMIN_SESSION_COOKIE : SESSION_COOKIE;
-    const raw = parseCookies(req.headers.cookie)[cookieName];
-    if (!raw || raw.length < 32 || raw.length > 128) return null;
-    const session = db.prepare("SELECT * FROM sessions WHERE session_hash = ?").get(hash(raw));
-    if (!session) return null;
-    const now = Date.now();
-    if (Date.parse(session.expires_at) <= now || now - Date.parse(session.last_seen_at) > SESSION_IDLE_MS) {
-      db.prepare("DELETE FROM sessions WHERE id = ?").run(session.id);
-      closeProxySession(session.id);
-      return null;
-    }
-    if (session.principal === "user") {
-      const account = db.prepare("SELECT * FROM accounts WHERE id = ?").get(session.account_id);
-      const token = db.prepare("SELECT * FROM tokens WHERE id = ?").get(session.token_id);
-      if (!account || account.revoked_at || !token || token.revoked_at || (token.expires_at && Date.parse(token.expires_at) <= now)) {
+    const cookies = parseCookies(req.headers.cookie);
+    const adminPath = req.url?.startsWith("/api/admin/");
+    const dashboardPath = req.url?.startsWith("/api/owner/dashboard/");
+    const candidates = adminPath || dashboardPath
+      ? [[ADMIN_SESSION_COOKIE, cookies[ADMIN_SESSION_COOKIE]], [SESSION_COOKIE, cookies[SESSION_COOKIE]]]
+      : [[SESSION_COOKIE, cookies[SESSION_COOKIE]]];
+    for (const [cookieName, raw] of candidates) {
+      if (!raw || raw.length < 32 || raw.length > 128) continue;
+      const session = db.prepare("SELECT * FROM sessions WHERE session_hash = ?").get(hash(raw));
+      if (!session) continue;
+      const now = Date.now();
+      if (Date.parse(session.expires_at) <= now || now - Date.parse(session.last_seen_at) > SESSION_IDLE_MS) {
         db.prepare("DELETE FROM sessions WHERE id = ?").run(session.id);
         closeProxySession(session.id);
-        return null;
+        continue;
       }
-      session.account = account;
-      session.token = token;
+      if (session.principal === "user") {
+        const account = db.prepare("SELECT * FROM accounts WHERE id = ?").get(session.account_id);
+        const token = db.prepare("SELECT * FROM tokens WHERE id = ?").get(session.token_id);
+        if (!account || account.revoked_at || !token || token.revoked_at || (token.expires_at && Date.parse(token.expires_at) <= now)) {
+          db.prepare("DELETE FROM sessions WHERE id = ?").run(session.id);
+          closeProxySession(session.id);
+          continue;
+        }
+        session.account = account;
+        session.token = token;
+      }
+      session.cookieName = cookieName;
+      db.prepare("UPDATE sessions SET last_seen_at = ? WHERE id = ?").run(new Date(now).toISOString(), session.id);
+      return session;
     }
-    db.prepare("UPDATE sessions SET last_seen_at = ? WHERE id = ?").run(new Date(now).toISOString(), session.id);
-    return session;
+    return null;
   }
 
   function requirePrincipal(session, principal) {
     if (!session || session.principal !== principal) throw new HttpError(401, "Sign in to continue.", "authentication_required");
+    return session;
+  }
+
+  function requireOwner(session) {
+    if (!session) throw new HttpError(401, "Owner sign-in required.", "authentication_required");
+    if (session.principal !== "admin" && !(session.principal === "user" && session.account?.rank === "owner")) {
+      throw new HttpError(403, "This account is not authorized to use the owner console.", "owner_required");
+    }
     return session;
   }
 
@@ -1115,13 +1260,49 @@ export async function createApp(options = {}) {
     const cookies = parseCookies(req.headers.cookie);
     const session = requestSession(req);
     const siteControls = getSiteControls();
-    if (siteControls.maintenanceMode && !path.startsWith("/api/admin/") && path !== "/api/auth/logout") {
+    if (siteControls.maintenanceMode && !path.startsWith("/api/admin/") && path !== "/api/owner/dashboard/tokens" && path !== "/api/auth/logout") {
       throw new HttpError(503, "Nightjar is temporarily in maintenance mode. Please try again later.", "maintenance_mode");
+    }
+
+    if (method === "GET" && path === "/api/owner/dashboard/tokens") {
+      requireOwner(session);
+      if (req.headers.origin && !dashboardOrigins.has(req.headers.origin)) {
+        throw new HttpError(403, "This dashboard origin is not configured.", "origin_rejected");
+      }
+      const rows = db.prepare(`SELECT id, rank, expires_at, usage_limit, usage_count, ai_usage_count, created_at, revoked_at
+        FROM tokens ORDER BY created_at DESC LIMIT 500`).all();
+      const now = Date.now();
+      const tokens = rows.map((row) => {
+        const status = row.revoked_at ? "revoked" : (row.expires_at && Date.parse(row.expires_at) <= now ? "expired" : "active");
+        return {
+          id: row.id,
+          tokenIdMasked: `••••${row.id.slice(-6)}`,
+          rank: row.rank,
+          status,
+          limit: row.usage_limit,
+          used: row.usage_count,
+          aiLimit: LIMITED_AI_RANKS.has(row.rank) ? BASIC_AI_REQUEST_LIMIT : null,
+          aiUsed: row.ai_usage_count,
+          expiresAt: row.expires_at,
+          revokedAt: row.revoked_at,
+          createdAt: row.created_at,
+        };
+      });
+      const summary = {
+        total: tokens.length,
+        active: tokens.filter((token) => token.status === "active").length,
+        revoked: tokens.filter((token) => token.status === "revoked").length,
+        expired: tokens.filter((token) => token.status === "expired").length,
+        totalLimit: tokens.reduce((total, token) => total + (token.limit ?? 0), 0),
+        totalUsed: tokens.reduce((total, token) => total + token.used, 0),
+      };
+      sendJson(res, 200, { tokens, summary }, { "Cache-Control": "no-store" });
+      return;
     }
 
     if (method === "POST" && path === "/api/auth/login") {
       validateOrigin(req);
-      consumeLimit(`user:${ip}`, 12, 5 * 60_000);
+      consumeLimit(`user:${ip}`, userLoginLimit, 5 * 60_000);
       const body = await readBody(req);
       if (typeof body.token !== "string" || body.token.length < 24 || body.token.length > 128) {
         throw new HttpError(401, "Invitation token was not recognized.", "invalid_token");
@@ -1183,7 +1364,7 @@ export async function createApp(options = {}) {
     }
 
     if (method === "GET" && path === "/api/admin/ranks") {
-      requirePrincipal(session, "admin");
+      requireOwner(session);
       const items = db.prepare("SELECT id, label, permissions_json, features_json, created_at FROM ranks ORDER BY label").all()
         .map((row) => ({
           id: row.id,
@@ -1196,8 +1377,34 @@ export async function createApp(options = {}) {
       return;
     }
 
+    if (method === "GET" && path === "/api/admin/friends") {
+      requireOwner(session);
+      const items = db.prepare(`SELECT id, label, rank, created_at, revoked_at FROM accounts
+        WHERE is_friend = 1 ORDER BY label`).all().map((row) => ({
+        id: row.id,
+        label: row.label,
+        rank: row.rank,
+        createdAt: row.created_at,
+        revokedAt: row.revoked_at,
+        status: row.revoked_at ? "revoked" : "active",
+      }));
+      sendJson(res, 200, { items });
+      return;
+    }
+
+    const friendMatch = path.match(/^\/api\/admin\/friends\/([0-9a-f-]{36})$/i);
+    if (method === "DELETE" && friendMatch) {
+      const admin = requireOwner(session);
+      requireCsrf(req, admin);
+      const result = db.prepare("UPDATE accounts SET is_friend = 0 WHERE id = ? AND is_friend = 1").run(friendMatch[1]);
+      if (!result.changes) throw new HttpError(404, "Friend account not found.", "not_found");
+      audit(db, "owner", "friend.removed", friendMatch[1], {}, ip);
+      sendJson(res, 200, { ok: true });
+      return;
+    }
+
     if (method === "GET" && path === "/api/admin/feedback") {
-      requirePrincipal(session, "admin");
+      requireOwner(session);
       const limit = Math.min(Number(url.searchParams.get("limit") ?? 100), 200);
       if (!Number.isInteger(limit) || limit < 1) throw new HttpError(400, "Limit must be between 1 and 200.");
       const items = db.prepare(`SELECT f.id, f.account_id, a.label AS account_label, f.kind, f.subject, f.message,
@@ -1218,7 +1425,7 @@ export async function createApp(options = {}) {
 
     const feedbackStatusMatch = path.match(/^\/api\/admin\/feedback\/([0-9a-f-]{36})$/);
     if (method === "PATCH" && feedbackStatusMatch) {
-      const admin = requirePrincipal(session, "admin");
+      const admin = requireOwner(session);
       requireCsrf(req, admin);
       const body = await readBody(req);
       if (!["open", "in_progress", "resolved"].includes(body.status)) {
@@ -1232,7 +1439,7 @@ export async function createApp(options = {}) {
     }
 
     if (method === "POST" && path === "/api/admin/ranks") {
-      const admin = requirePrincipal(session, "admin");
+      const admin = requireOwner(session);
       requireCsrf(req, admin);
       const body = await readBody(req);
       const label = typeof body.label === "string" ? body.label.trim().slice(0, 40) : "";
@@ -1263,8 +1470,11 @@ export async function createApp(options = {}) {
 
     const deleteRankMatch = path.match(/^\/api\/admin\/ranks\/([a-z0-9-]{1,40})$/);
     if (method === "DELETE" && deleteRankMatch) {
-      const admin = requirePrincipal(session, "admin");
+      const admin = requireOwner(session);
       requireCsrf(req, admin);
+      if (DEFAULT_RANKS.some((rank) => rank.id === deleteRankMatch[1])) {
+        throw new HttpError(409, "Built-in access ranks cannot be removed.", "built_in_rank");
+      }
       if (db.prepare("SELECT COUNT(*) AS count FROM ranks").get().count <= 1) {
         throw new HttpError(409, "Keep at least one rank so new invitations can still be issued.");
       }
@@ -1349,36 +1559,114 @@ export async function createApp(options = {}) {
       return;
     }
 
+    if (method === "GET" && path === "/api/project-areas") {
+      const user = requirePrincipal(session, "user");
+      const items = db.prepare(`SELECT id, name, kind, created_at, updated_at FROM project_areas
+        WHERE account_id = ? ORDER BY created_at DESC`).all(user.account_id).map((row) => ({
+        id: row.id,
+        kind: row.kind,
+        name: row.name,
+        label: `${user.account.label}'s ${row.name}`,
+        createdAt: row.created_at,
+        updatedAt: row.updated_at,
+      }));
+      sendJson(res, 200, { items });
+      return;
+    }
+
+    if (method === "POST" && path === "/api/project-areas") {
+      const user = requirePrincipal(session, "user");
+      requireCsrf(req, user);
+      const body = await readBody(req);
+      const kind = body.kind;
+      if (!["proxy", "games", "custom"].includes(kind)) throw new HttpError(400, "Choose Proxy, games, or a custom project area.");
+      const fallbackName = kind === "proxy" ? "Proxy" : kind === "games" ? "games" : "";
+      const name = typeof body.name === "string" ? body.name.trim() : fallbackName;
+      if (!name || name.length > 50 || /[\u0000-\u001f]/.test(name)) {
+        throw new HttpError(400, "Project area name must be between 1 and 50 printable characters.");
+      }
+      const id = randomUUID();
+      const now = new Date().toISOString();
+      try {
+        db.prepare("INSERT INTO project_areas(id, account_id, name, kind, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)")
+          .run(id, user.account_id, name, kind, now, now);
+      } catch (error) {
+        if (error.code === "ERR_SQLITE_ERROR" && /UNIQUE/.test(error.message)) {
+          throw new HttpError(409, "You already have a project area with that name.", "project_area_exists");
+        }
+        throw error;
+      }
+      audit(db, user.account.label, "project_area.created", id, { kind, name }, ip);
+      sendJson(res, 201, { item: { id, kind, name, label: `${user.account.label}'s ${name}`, createdAt: now, updatedAt: now } });
+      return;
+    }
+
+    const projectAreaMatch = path.match(/^\/api\/project-areas\/([0-9a-f-]{36})$/i);
+    if (method === "PATCH" && projectAreaMatch) {
+      const user = requirePrincipal(session, "user");
+      requireCsrf(req, user);
+      const body = await readBody(req);
+      const current = db.prepare("SELECT id, name, kind, created_at FROM project_areas WHERE id = ? AND account_id = ?")
+        .get(projectAreaMatch[1], user.account_id);
+      if (!current) throw new HttpError(404, "Project area not found.", "not_found");
+      const name = body.name === undefined ? current.name : (typeof body.name === "string" ? body.name.trim() : "");
+      const kind = body.kind === undefined ? current.kind : body.kind;
+      if (!name || name.length > 50 || /[\u0000-\u001f]/.test(name)) {
+        throw new HttpError(400, "Project area name must be between 1 and 50 printable characters.");
+      }
+      if (!["proxy", "games", "custom"].includes(kind)) throw new HttpError(400, "Choose Proxy, games, or a custom project area.");
+      const now = new Date().toISOString();
+      try {
+        db.prepare("UPDATE project_areas SET name = ?, kind = ?, updated_at = ? WHERE id = ? AND account_id = ?")
+          .run(name, kind, now, current.id, user.account_id);
+      } catch (error) {
+        if (error.code === "ERR_SQLITE_ERROR" && /UNIQUE/.test(error.message)) {
+          throw new HttpError(409, "You already have a project area with that name.", "project_area_exists");
+        }
+        throw error;
+      }
+      audit(db, user.account.label, "project_area.updated", current.id, { kind, name }, ip);
+      sendJson(res, 200, { item: { id: current.id, kind, name, label: `${user.account.label}'s ${name}`, createdAt: current.created_at, updatedAt: now } });
+      return;
+    }
+
+    if (method === "DELETE" && projectAreaMatch) {
+      const user = requirePrincipal(session, "user");
+      requireCsrf(req, user);
+      const result = db.prepare("DELETE FROM project_areas WHERE id = ? AND account_id = ?").run(projectAreaMatch[1], user.account_id);
+      if (!result.changes) throw new HttpError(404, "Project area not found.", "not_found");
+      audit(db, user.account.label, "project_area.deleted", projectAreaMatch[1], {}, ip);
+      sendJson(res, 200, { ok: true });
+      return;
+    }
+
     if (method === "POST" && path === "/api/admin/logout") {
-      const admin = requirePrincipal(session, "admin");
+      const admin = requireOwner(session);
       requireCsrf(req, admin);
       db.prepare("DELETE FROM sessions WHERE id = ?").run(admin.id);
       audit(db, "owner", "admin.session_ended", "owner", {}, ip);
-      sendJson(res, 200, { ok: true }, { "Set-Cookie": cookieHeader("", config.secureCookie, true, ADMIN_SESSION_COOKIE) });
+      sendJson(res, 200, { ok: true }, { "Set-Cookie": cookieHeader("", config.secureCookie, true, admin.cookieName) });
       return;
     }
 
     if (method === "GET" && path === "/api/admin/me") {
-      if (!session || session.principal !== "admin") {
-        sendJson(res, 401, { error: "Administrator sign-in required.", code: "authentication_required" });
-        return;
-      }
+      const ownerSession = requireOwner(session);
       sendJson(res, 200, {
         authenticated: true,
-        csrf: csrfForSession(cookies[ADMIN_SESSION_COOKIE]),
+        csrf: csrfForSession(cookies[ownerSession.cookieName]),
         twoFactorEnabled: Boolean(db.prepare("SELECT totp_enabled FROM owner WHERE id = 1").get().totp_enabled),
       });
       return;
     }
 
     if (method === "GET" && path === "/api/admin/site-controls") {
-      requirePrincipal(session, "admin");
+      requireOwner(session);
       sendJson(res, 200, { settings: getSiteControls() });
       return;
     }
 
     if (method === "PATCH" && path === "/api/admin/site-controls") {
-      const admin = requirePrincipal(session, "admin");
+      const admin = requireOwner(session);
       requireCsrf(req, admin);
       const body = await readBody(req);
       const current = getSiteControls();
@@ -1398,7 +1686,7 @@ export async function createApp(options = {}) {
     }
 
     if (method === "POST" && path === "/api/admin/desktop/ticket") {
-      const admin = requirePrincipal(session, "admin");
+      const admin = requireOwner(session);
       requireCsrf(req, admin);
       if (!/^[a-f0-9]{64}$/i.test(desktopSecret)) {
         throw new HttpError(503, "Set DESKTOP_COMPANION_SECRET in .env before pairing the local companion.", "companion_not_configured");
@@ -1426,7 +1714,7 @@ export async function createApp(options = {}) {
     }
 
     if (method === "GET" && path === "/api/admin/summary") {
-      requirePrincipal(session, "admin");
+      requireOwner(session);
       if (await ollamaAvailable()) aiState.status = "running";
       const activeUserSessions = db.prepare("SELECT COUNT(*) AS count FROM sessions WHERE principal = 'user' AND expires_at > ?").get(new Date().toISOString()).count;
       const tokenStats = db.prepare("SELECT COUNT(*) AS total, SUM(CASE WHEN revoked_at IS NULL AND (expires_at IS NULL OR expires_at > ?) THEN 1 ELSE 0 END) AS active FROM tokens")
@@ -1452,7 +1740,7 @@ export async function createApp(options = {}) {
     }
 
     if (method === "GET" && path === "/api/admin/tokens") {
-      requirePrincipal(session, "admin");
+      requireOwner(session);
       const rows = db.prepare(`SELECT t.*, a.label AS account_label FROM tokens t JOIN accounts a ON a.id = t.account_id
         ORDER BY t.created_at DESC LIMIT 200`).all();
       sendJson(res, 200, { items: rows.map(rowToToken) });
@@ -1460,7 +1748,7 @@ export async function createApp(options = {}) {
     }
 
     if (method === "GET" && path === "/api/admin/accounts") {
-      requirePrincipal(session, "admin");
+      requireOwner(session);
       const items = db.prepare("SELECT * FROM accounts ORDER BY created_at DESC LIMIT 200").all()
         .map((row) => ({
           id: row.id,
@@ -1478,7 +1766,7 @@ export async function createApp(options = {}) {
 
     const accountMatch = path.match(/^\/api\/admin\/accounts\/([0-9a-f-]{36})$/i);
     if (method === "PATCH" && accountMatch) {
-      const admin = requirePrincipal(session, "admin");
+      const admin = requireOwner(session);
       requireCsrf(req, admin);
       const body = await readBody(req);
       const account = db.prepare("SELECT * FROM accounts WHERE id = ?").get(accountMatch[1]);
@@ -1503,6 +1791,8 @@ export async function createApp(options = {}) {
       const sessions = db.prepare("SELECT id FROM sessions WHERE account_id = ? AND principal = 'user'").all(account.id);
       db.prepare("UPDATE accounts SET label = ?, rank = ?, permissions_json = ?, features_json = ?, settings_json = ? WHERE id = ?")
         .run(label, rank, JSON.stringify(permissions), JSON.stringify(features), JSON.stringify(settings), account.id);
+      db.prepare("UPDATE tokens SET rank = ?, permissions_json = ? WHERE account_id = ?")
+        .run(rank, JSON.stringify(permissions), account.id);
       db.prepare("DELETE FROM sessions WHERE account_id = ? AND principal = 'user'").run(account.id);
       for (const active of sessions) closeProxySession(active.id);
       audit(db, "owner", "account.updated", account.id, { label, rank, permissions, features, sessionCountTerminated: sessions.length }, ip);
@@ -1512,7 +1802,7 @@ export async function createApp(options = {}) {
 
     const revokeAccountMatch = path.match(/^\/api\/admin\/accounts\/([0-9a-f-]{36})\/revoke$/i);
     if (method === "POST" && revokeAccountMatch) {
-      const admin = requirePrincipal(session, "admin");
+      const admin = requireOwner(session);
       requireCsrf(req, admin);
       const account = db.prepare("SELECT id, revoked_at FROM accounts WHERE id = ?").get(revokeAccountMatch[1]);
       if (!account) throw new HttpError(404, "Account not found.", "not_found");
@@ -1526,7 +1816,7 @@ export async function createApp(options = {}) {
     }
 
     if (method === "GET" && path === "/api/admin/sessions") {
-      requirePrincipal(session, "admin");
+      requireOwner(session);
       const items = db.prepare(`SELECT s.id, s.account_id, s.token_id, s.created_at, s.last_seen_at, s.expires_at, a.label AS account_label
         FROM sessions s JOIN accounts a ON a.id = s.account_id WHERE s.principal = 'user' ORDER BY s.last_seen_at DESC`).all()
         .map((row) => ({ id: row.id, accountId: row.account_id, tokenId: row.token_id, accountLabel: row.account_label, createdAt: row.created_at, lastSeenAt: row.last_seen_at, expiresAt: row.expires_at }));
@@ -1535,19 +1825,22 @@ export async function createApp(options = {}) {
     }
 
     if (method === "POST" && path === "/api/admin/tokens") {
-      const admin = requirePrincipal(session, "admin");
+      const admin = requireOwner(session);
       requireCsrf(req, admin);
       if (!siteControls.invitationsEnabled) throw new HttpError(423, "New invitations are disabled by the owner.", "invitations_disabled");
       const body = await readBody(req);
       const label = typeof body.label === "string" ? body.label.trim().slice(0, 80) : "";
       const requestedAccountLabel = typeof body.accountLabel === "string" ? body.accountLabel.trim().slice(0, 80) : "";
       if (!label) throw new HttpError(400, "Token label is required.");
+      if (body.friend !== undefined && typeof body.friend !== "boolean") {
+        throw new HttpError(400, "Friend status must be a boolean.");
+      }
       const accountId = typeof body.accountId === "string" && body.accountId
         ? body.accountId
         : randomUUID();
       const existingAccount = db.prepare("SELECT * FROM accounts WHERE id = ?").get(accountId);
       if (existingAccount && existingAccount.revoked_at) throw new HttpError(400, "Revoked accounts cannot receive replacement invitations.");
-      let rankId = typeof body.rank === "string" && body.rank ? body.rank : (existingAccount?.rank ?? "standard");
+      let rankId = typeof body.rank === "string" && body.rank ? body.rank : (existingAccount?.rank ?? "basic-plus");
       let rank = db.prepare("SELECT * FROM ranks WHERE id = ?").get(rankId);
       if (!rank && existingAccount && !body.rank) {
         rank = { permissions_json: existingAccount.permissions_json, features_json: existingAccount.features_json };
@@ -1579,15 +1872,19 @@ export async function createApp(options = {}) {
       const accountLabel = requestedAccountLabel || existingAccount?.label || label;
       if (!existingAccount) {
         const settings = normalizeSettings(body.settings ?? {}, DEFAULT_SETTINGS);
-        db.prepare(`INSERT INTO accounts(id, label, settings_json, permissions_json, features_json, rank, created_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?)`)
-          .run(accountId, accountLabel, JSON.stringify(settings), JSON.stringify(permissions), JSON.stringify(features), rankId, new Date().toISOString());
+        db.prepare(`INSERT INTO accounts(id, label, settings_json, permissions_json, features_json, rank, is_friend, created_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+          .run(accountId, accountLabel, JSON.stringify(settings), JSON.stringify(permissions), JSON.stringify(features), rankId, body.friend ? 1 : 0, new Date().toISOString());
+        createDefaultProjectAreas(db, accountId);
       } else {
         const updated = body.settings === undefined
           ? safeJson(existingAccount.settings_json, DEFAULT_SETTINGS)
           : normalizeSettings(body.settings, safeJson(existingAccount.settings_json, DEFAULT_SETTINGS));
-        db.prepare("UPDATE accounts SET label = ?, settings_json = ?, permissions_json = ?, features_json = ?, rank = ? WHERE id = ?")
-          .run(accountLabel, JSON.stringify(updated), JSON.stringify(permissions), JSON.stringify(features), rankId, accountId);
+        db.prepare(`UPDATE accounts SET label = ?, settings_json = ?, permissions_json = ?, features_json = ?, rank = ?,
+          is_friend = CASE WHEN ? THEN 1 ELSE is_friend END WHERE id = ?`)
+          .run(accountLabel, JSON.stringify(updated), JSON.stringify(permissions), JSON.stringify(features), rankId, body.friend === true ? 1 : 0, accountId);
+        db.prepare("UPDATE tokens SET rank = ?, permissions_json = ? WHERE account_id = ?")
+          .run(rankId, JSON.stringify(permissions), accountId);
       }
       const value = randomBytes(32).toString("base64url");
       const tokenId = randomUUID();
@@ -1606,6 +1903,8 @@ export async function createApp(options = {}) {
         expiresAt,
         usageLimit,
         usageCount: 0,
+        aiUsageLimit: LIMITED_AI_RANKS.has(rankId) ? BASIC_AI_REQUEST_LIMIT : null,
+        aiUsageCount: 0,
         createdAt: now,
         lastUsedAt: null,
         revokedAt: null,
@@ -1616,7 +1915,7 @@ export async function createApp(options = {}) {
 
     const revokeMatch = path.match(/^\/api\/admin\/tokens\/([0-9a-f-]{36})\/revoke$/);
     if (method === "POST" && revokeMatch) {
-      const admin = requirePrincipal(session, "admin");
+      const admin = requireOwner(session);
       requireCsrf(req, admin);
       const row = db.prepare("SELECT * FROM tokens WHERE id = ?").get(revokeMatch[1]);
       if (!row) throw new HttpError(404, "Invitation not found.", "not_found");
@@ -1631,7 +1930,7 @@ export async function createApp(options = {}) {
 
     const terminateMatch = path.match(/^\/api\/admin\/sessions\/([0-9a-f-]{36})\/terminate$/);
     if (method === "POST" && terminateMatch) {
-      const admin = requirePrincipal(session, "admin");
+      const admin = requireOwner(session);
       requireCsrf(req, admin);
       const row = db.prepare("SELECT id, account_id FROM sessions WHERE id = ? AND principal = 'user'").get(terminateMatch[1]);
       if (!row) throw new HttpError(404, "Session not found.", "not_found");
@@ -1643,7 +1942,7 @@ export async function createApp(options = {}) {
     }
 
     if (method === "GET" && path === "/api/admin/audit") {
-      requirePrincipal(session, "admin");
+      requireOwner(session);
       const limit = pageLimit(url);
       const before = url.searchParams.get("before");
       const rows = before
@@ -1795,7 +2094,11 @@ export async function createApp(options = {}) {
       const user = requirePrincipal(session, "user");
       const features = safeJson(user.account.features_json, []);
       const permissions = safeJson(user.account.permissions_json, []);
-      const aiAllowed = siteControls.assistantEnabled && features.includes("assistant") && permissions.includes("assistant");
+      const aiLimit = LIMITED_AI_RANKS.has(user.token.rank) ? BASIC_AI_REQUEST_LIMIT : null;
+      const aiUsed = user.token.ai_usage_count ?? 0;
+      const aiRemaining = aiLimit === null ? null : Math.max(0, aiLimit - aiUsed);
+      const hasAiPermission = features.includes("assistant") && permissions.includes("assistant");
+      const aiAllowed = siteControls.assistantEnabled && hasAiPermission && (aiRemaining === null || aiRemaining > 0);
       let modelInstalled = false;
       let reachable = false;
       if (aiAllowed) {
@@ -1822,7 +2125,8 @@ export async function createApp(options = {}) {
           modelInstalled,
           serviceStatus: aiAllowed ? aiState.status : "not_allowed",
           startedByApp: aiState.startedByApp,
-          reason: !siteControls.assistantEnabled ? "The owner has disabled local assistant access for this site." : (!aiAllowed ? "The account does not have local assistant permission." : (!reachable ? "The local Ollama service is not responding yet." : (!modelInstalled ? `Model ${aiModel} is not installed. Install it locally with Ollama before chatting.` : ""))),
+          usage: { limit: aiLimit, used: aiUsed, remaining: aiRemaining },
+          reason: !siteControls.assistantEnabled ? "The owner has disabled local assistant access for this site." : (!hasAiPermission ? "The account does not have local assistant permission." : (aiRemaining === 0 ? "This token has used all 20 Basic AI requests." : (!reachable ? "The local Ollama service is not responding yet." : (!modelInstalled ? `Model ${aiModel} is not installed. Install it locally with Ollama before chatting.` : "")))),
         },
         features,
       });
@@ -1835,6 +2139,10 @@ export async function createApp(options = {}) {
       requirePermission(user, "assistant");
       if (!siteControls.assistantEnabled) throw new HttpError(403, "The owner has disabled local assistant access for this site.", "assistant_disabled");
       consumeLimit(`ai:${user.account_id}`, 30, 5 * 60_000);
+      const aiLimit = LIMITED_AI_RANKS.has(user.token.rank) ? BASIC_AI_REQUEST_LIMIT : null;
+      if (aiLimit !== null && (user.token.ai_usage_count ?? 0) >= aiLimit) {
+        throw new HttpError(429, "This invitation has used all 20 Basic AI requests.", "ai_quota_exhausted");
+      }
       const body = await readBody(req);
       if (!Array.isArray(body.messages) || body.messages.length < 1 || body.messages.length > 20) {
         throw new HttpError(400, "Send between 1 and 20 chat messages.");
@@ -1885,6 +2193,7 @@ export async function createApp(options = {}) {
         if (upstream.status === 404) throw new HttpError(503, `Ollama could not find ${aiModel}. Install that model locally, then retry.`, "ai_model_missing");
         throw new HttpError(502, `Local Ollama returned an error${detail ? `: ${detail}` : "."}`, "ai_upstream_error");
       }
+      db.prepare("UPDATE tokens SET ai_usage_count = ai_usage_count + 1 WHERE id = ?").run(user.token_id);
       res.writeHead(200, {
         "Content-Type": "text/event-stream; charset=utf-8",
         "Cache-Control": "no-store, no-transform",
@@ -1961,10 +2270,36 @@ export async function createApp(options = {}) {
     }
   }
 
+  function handleDashboardCors(req, res, url) {
+    if (url.pathname !== "/api/owner/dashboard/tokens") return false;
+    const origin = req.headers.origin;
+    if (origin) {
+      if (!dashboardOrigins.has(origin)) throw new HttpError(403, "This dashboard origin is not configured.", "origin_rejected");
+      res.setHeader("Access-Control-Allow-Origin", origin);
+      res.setHeader("Access-Control-Allow-Credentials", "true");
+      res.setHeader("Vary", "Origin");
+    }
+    res.setHeader("Cache-Control", "no-store");
+    if (req.method !== "OPTIONS") return false;
+    if (!origin) throw new HttpError(403, "A configured dashboard origin is required.", "origin_rejected");
+    const requestedHeaders = (req.headers["access-control-request-headers"] ?? "")
+      .split(",").map((header) => header.trim().toLowerCase()).filter(Boolean);
+    if (requestedHeaders.some((header) => !["content-type"].includes(header))) {
+      throw new HttpError(403, "The dashboard preflight requested an unsupported header.", "headers_rejected");
+    }
+    res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
+    if (requestedHeaders.length) res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+    res.setHeader("Access-Control-Max-Age", "600");
+    res.statusCode = 204;
+    res.end();
+    return true;
+  }
+
   async function route(req, res) {
     const start = Date.now();
     const url = new URL(req.url, "http://nightjar.local");
     try {
+      if (handleDashboardCors(req, res, url)) return;
       if (url.pathname.startsWith("/api/")) {
         await routeApi(req, res, url);
       } else {
@@ -2228,15 +2563,17 @@ quit
 Create options:
 --account-label "Guest"          Account label
 --account-id <uuid>              Add a replacement invitation to an existing account
---rank <rank-id>                  Apply an access preset
+--rank <rank-id>                 basic,basic-plus,ai,full-minus,owner or custom
 --uses 1                         Every invitation is single-use
 --expires <date-or-timestamp>    e.g. 2026-12-31
 --permissions <comma-list>       browse,bookmarks,history,settings,assistant,games,support
 --features <comma-list|none>     bookmarks,history,settings,assistant,games,support
  
 Each invitation can be redeemed once. The signed-in browser uses an HttpOnly cookie session;
-use \`token renew\` to issue a replacement. Ranks only grant browser features, never owner access.
-Enabled features must also appear in permissions. A token is shown only once.
+use \`token renew\` to issue a replacement. Basic and Basic+ include 20 lifetime local AI
+requests per token; AI, Full- and Owner include unlimited local AI. Only Owner rank
+grants owner-console access. Enabled features must also appear in permissions.
+A token is shown only once.
 Revoking a token also terminates the session created by that token.`);
 }
 

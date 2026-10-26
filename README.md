@@ -8,12 +8,14 @@ Nightjar is a private, invitation-only browser workspace with original dark/ligh
 - Rammerhead-managed in-app browsing through a **separate origin and server port**. The main application and account cookies stay on the Nightjar origin. Each Rammerhead session is bound to an authenticated Nightjar session; outbound destinations are limited to public HTTP(S) hosts on ports 80/443, and private/reserved IP addresses are blocked.
 - Database-backed bookmarks, history, settings, support requests and suggestions. Each account’s permissions are checked server-side.
 - A polished Game lounge that opens the current GN Math site (`gn-math.dev`) in a fresh Rammerhead-managed Nightjar tab, plus an original offline arithmetic sprint. The sprint sends no game data to the server; its personal-best score is saved in that browser profile.
-- Owner-only console and administration panel for accounts and their grants/settings, one-time invitations, permission ranks, live sessions, site-wide maintenance/invitation/AI controls, support/idea inbox, audit events and service status.
-- Basic, Standard and Full invitation ranks, plus owner-defined custom ranks. Ranks can only grant browser features; they cannot grant owner or desktop access. Removing a rank only removes it from future invitation choices; existing account permissions remain unchanged.
+- Owner console for accounts, one-time invitations, live sessions, site controls, support requests, audit events and service status. Access is enforced by the server for the separate owner login or the explicitly assigned Owner rank; hiding the console link is only a UI convenience.
+- Basic, Basic+, AI, Full- and Owner invitation ranks. Basic and Basic+ share a lifetime allowance of 20 local AI requests per invitation token; AI, Full- and Owner have unlimited AI. Full- and Owner include customization. Owner otherwise has Full- features and is the only invitation rank that grants console access.
+- Private project areas per account, with initial `"[account]'s Proxy"` and `"[account]'s games"` areas. Each account can add, rename and remove its own areas; IDs and area contents are never shared across accounts.
 - A small local **Nightjar Searcher** desktop app with an address/search bar, back/forward/reload/home controls, and Bing, Google, DuckDuckGo, Brave, or Yandex. It renders destination websites directly with Electron's Chromium engine on the user's PC, without a web proxy.
 - Invitations are cryptographically random, stored as SHA-256 hashes, and can be redeemed once. A user’s browser then stays authenticated using an HttpOnly, SameSite cookie and a server-side session.
 - Optional local AI using Ollama at `127.0.0.1:11434`, default model `qwen3:4b`. With `OLLAMA_AUTOSTART=1`, Nightjar starts the fixed `ollama serve` executable with `shell: false` if no local API is already responding. The app-managed server is loopback-only and uses `OLLAMA_NO_CLOUD=1`; Nightjar does not install or download models.
 - Separate owner authentication with scrypt password verification, optional TOTP, independent concurrent owner sessions using separate admin cookies, rate limits, CSRF and same-origin checks on mutations, security headers and audit logging.
+- A Friends panel lets the owner add invitees one at a time, review them and remove a friend-list entry without revoking their account. Friends use their selected regular rank; adding a friend does not grant admin access.
 
 ## Browser and device boundaries
 
@@ -60,7 +62,7 @@ openssl rand -hex 32
 
 Set the output as `DESKTOP_COMPANION_SECRET` and keep it private. The same project `.env` is read by the app and companion. Start Nightjar normally, then run `npm run companion` in a second terminal on the same Linux PC. While signed into `/admin`, open **Sessions** and click **Pair this owner session**; no code entry is needed. When you choose screen sharing or remote input, approve that capability by typing `YES` into the companion terminal. The companion requires Wayland plus the existing `grim`, `ydotool`, and running `ydotoold` executables/services; Nightjar does not install system packages, run them as root, grant device permissions, or start them automatically. Press Ctrl+C in its terminal or use the owner console's **Stop sharing & disconnect** button to end access. If the browser closes or loses its heartbeat, the companion stops after one minute.
 
-The owner panel is at `/admin`; it is separate from user accounts. Use **Accounts** to change a user's rank, permissions, features and preferences or revoke all their access. **Site controls** can pause user APIs and proxied browsing in maintenance mode, disable new invitations, or disable assistant access; the owner console stays available during maintenance. Create invitations from **Invitations** and copy each token before closing its one-time reveal. The database never stores the raw token.
+The owner panel is at `/admin`. The separately authenticated owner session and an account explicitly assigned the Owner rank can use it; all other account ranks are denied by server-side authorization. Use **Friends** to invite people one at a time and remove them from the list without revoking their account. **Accounts** manages ranks, permissions, features and preferences. **Site controls** can pause user APIs and proxied browsing in maintenance mode, disable new invitations, or disable assistant access; the owner console stays available during maintenance. Create invitations from **Invitations** and copy each token before closing its one-time reveal. The database never stores the raw token.
 
 ## Owner terminal commands
 
@@ -70,9 +72,9 @@ When started from an interactive terminal, Nightjar exposes a `nightjar>` prompt
 tokens
 accounts
 ranks
-token make "Guest laptop" standard
+token make "Guest laptop" basic-plus
 token make "Study group" basic
-token renew <account-id> "Replacement" full
+token renew <account-id> "Replacement" full-minus
 tokens revoke <token-id>
 revoke <token-id>
 ```
@@ -93,6 +95,7 @@ Create custom ranks with `ranks create "Study group" --permissions browse,games,
 | `RAMMERHEAD_ORIGIN` | local origin from host/port | Exact public Rammerhead origin, with no path. Required in production. It must be different from `APP_ORIGIN`. |
 | `NODE_ENV` | `development` | Set to `production` behind HTTPS; production cookies use `Secure`. |
 | `DATABASE_PATH` | `./data/nightjar.sqlite` | SQLite database path. |
+| `DASHBOARD_ORIGINS` | unset | Optional comma-separated exact dashboard origins allowed to make credentialed cross-origin token-dashboard requests. No wildcard; production origins must be HTTPS. |
 | `ADMIN_INITIAL_PASSWORD` | unset | Required to initialize a new owner database; minimum 16 characters. |
 | `ADMIN_TOTP_SECRET` | unset | Optional base32 RFC 6238 TOTP secret. |
 | `OLLAMA_AUTOSTART` | `1` | Start `ollama serve` when the loopback API is unavailable; set `0` to disable. |
@@ -111,17 +114,23 @@ Each invitation allows exactly one successful sign-in. The server increments its
 
 Each account permits one active session. A second, different valid invitation used while its account is signed in revokes the account’s invitations and terminates the active session; the owner must issue a replacement. This is intentionally strict and may require a replacement when moving to a different browser or device. If the browser's cookie is lost or the 12-hour session expires, the owner can issue a replacement with `token renew <account-id> "Replacement" <rank>`.
 
-Default ranks are:
+Default ranks and limits are:
 
 | Rank | Features |
 |---|---|
-| Basic | Browse, support and suggestions |
-| Standard | Basic plus bookmarks, history, settings and math games |
-| Full | All supported browser features, including the local assistant |
-| Without AI | Standard features, with the local assistant disabled |
-| With AI | Standard features plus the local assistant |
+| Basic | Search/browse and 20 local AI requests per invitation token |
+| Basic+ | Search, bookmarks, history and 20 local AI requests per invitation token |
+| AI | Search, bookmarks, history and unlimited local AI |
+| Full- | AI features plus settings, complete customization and games |
+| Owner | Full- features plus the owner console |
 
-Custom ranks are configurable from the Owner console. Rank permissions are copied onto an account when an invitation is issued; removing a rank does not remove or alter permissions on existing accounts. Owner/admin access is never an invitation permission.
+The Basic AI cap is lifetime and tracked on the invitation token; issuing a replacement token starts that token's allowance over. Custom ranks remain configurable from the Owner console. Built-in ranks cannot be deleted, and custom rank names or grants do not grant owner access. The Owner rank must be selected explicitly when creating or changing an account.
+
+Full- and Owner accounts can change the browser tab title and icon and drag toolbar controls into a per-account order from Settings. Settings and saved layout preferences are not available to lower ranks.
+
+The token dashboard API is `GET /api/owner/dashboard/tokens`, authenticated by the existing HttpOnly `nj_admin` cookie or an explicitly assigned Owner-rank session cookie. It returns masked token IDs, rank, active/revoked/expired status, redemption usage, AI usage and timestamps; raw token values and hashes are never returned. Cross-origin browser access requires a comma-separated exact-origin `DASHBOARD_ORIGINS` allowlist and credentialed CORS without wildcards. Since production owner cookies remain `SameSite=Strict; Secure`, deploy the dashboard same-site with Nightjar (such as a sibling HTTPS subdomain), or call through a same-origin reverse proxy/BFF; unrelated-site third-party cookies are not supported.
+
+Each user's Project areas are private, account-owned organizational labels, not shared files or project source. The initial areas are named from the account label (for example, `Alex's Proxy` and `Alex's games`). Every user's CRUD API operation is scoped server-side to the signed-in account.
 
 ## Support, suggestions and games
 
@@ -143,7 +152,7 @@ Run:
 npm test
 ```
 
-The tests use a temporary SQLite database and mock local Ollama responses; they do not download a model or generate model output. They cover administrator isolation, token hashing/one-time redemption, cookie sessions, concurrent-session revocation, permissions, ranks and renewal commands, browser grant issuance, proxy asset isolation, bookmarks/history/settings, local-AI authorization, and TOTP.
+The tests use a temporary SQLite database and mock local Ollama responses; they do not download a model or generate model output. They cover Owner-rank authorization and dashboard CORS/secrecy, friend list isolation, private project areas, token-scoped Basic AI quotas, customization permissions, rank migrations, token hashing/one-time redemption, sessions, proxy isolation, bookmarks/history/settings, and TOTP.
 
 - **Port already in use:** another Nightjar instance may already be running. Do not start a second copy; stop the existing instance from its own terminal or change both `PORT` and `APP_ORIGIN`, and both `RAMMERHEAD_PORT` and `RAMMERHEAD_ORIGIN`.
 - **Rammerhead page does not open:** check the Nightjar log for “Rammerhead browsing engine is ready”, confirm `RAMMERHEAD_PORT` is reachable from the browser, and ensure the app and proxy have distinct origins. Some sites remain incompatible with web-based proxying.

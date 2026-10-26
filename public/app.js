@@ -45,6 +45,9 @@ const defaults = {
   homepage: "home",
   searchProvider: "duckduckgo",
   customCursor: true,
+  customTitle: "",
+  customIcon: "",
+  toolbarOrder: ["bookmarks-open", "history-open", "downloads-open", "assistant-open", "games-open", "open-regular", "theme-toggle", "settings-open", "help-open", "admin-link"],
   privacy: { suppressReferrer: true, clearOnExit: false },
 };
 const state = {
@@ -55,6 +58,7 @@ const state = {
   closed: [],
   settings: { ...defaults, privacy: { ...defaults.privacy } },
   bookmarks: [],
+  projectAreas: [],
   capabilities: null,
   assistantConversation: [],
   assistantBusy: false,
@@ -132,6 +136,7 @@ function loadLocalState() {
 function applySettings() {
   const systemLight = matchMedia("(prefers-color-scheme: light)").matches;
   const theme = state.settings.theme === "system" ? (systemLight ? "light" : "dark") : state.settings.theme;
+  const canCustomize = Boolean(state.account?.permissions.includes("settings") && state.account?.features.includes("settings"));
   document.body.dataset.theme = theme;
   document.body.dataset.density = state.settings.density;
   document.documentElement.style.setProperty("--accent", state.settings.accent);
@@ -139,6 +144,28 @@ function applySettings() {
   document.body.dataset.customCursor = custom ? "true" : "false";
   document.body.dataset.nativeCursor = custom ? "false" : "true";
   $("#page-frame").referrerPolicy = state.settings.privacy.suppressReferrer ? "no-referrer" : "strict-origin-when-cross-origin";
+  const toolbar = $("#toolbar-tools");
+  const toolbarOrder = canCustomize && Array.isArray(state.settings.toolbarOrder)
+    ? state.settings.toolbarOrder
+    : defaults.toolbarOrder;
+  for (const id of toolbarOrder) {
+    const item = document.getElementById(id);
+    if (item?.parentElement === toolbar) toolbar.append(item);
+  }
+  for (const item of $$("[data-movable-toolbar-item]", toolbar)) {
+    item.draggable = Boolean(state.account?.features.includes("settings") && state.account?.permissions.includes("settings"));
+  }
+  const iconLink = $('link[rel="icon"]');
+  if (iconLink) {
+    const customIcon = canCustomize ? state.settings.customIcon?.trim() : "";
+    if (customIcon) {
+      const safeText = customIcon.replace(/[&<>]/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[character]);
+      iconLink.href = `data:image/svg+xml,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="16" fill="${state.settings.accent}"/><text x="50%" y="54%" dominant-baseline="middle" text-anchor="middle" font-size="44">${safeText}</text></svg>`)}`;
+    } else {
+      iconLink.href = "/mark.svg";
+    }
+  }
+  document.title = (canCustomize ? state.settings.customTitle?.trim() : "") || (state.account ? `Nightjar — ${state.account.label}` : "Nightjar");
   const toggle = $("#theme-toggle");
   if (toggle) {
     const nextTheme = { dark: "light", light: "system", system: "dark" }[state.settings.theme] ?? "light";
@@ -496,6 +523,7 @@ function applyDisplay(result) {
   applyAccountFeatures();
   $("#home-date").textContent = new Intl.DateTimeFormat(undefined, { dateStyle: "medium" }).format(new Date());
   loadLocalState();
+  void loadProjectAreas();
   void refreshBookmarks();
   void refreshCapabilities();
   if (!state.heartbeatTimer) state.heartbeatTimer = setInterval(() => heartbeat(), 25_000);
@@ -514,7 +542,50 @@ function applyAccountFeatures() {
   $("#theme-toggle").hidden = !permits("settings");
   $("#bookmark-current").hidden = !permits("bookmarks");
   $("#games-open").hidden = !permits("games");
+  $("#admin-link").hidden = state.account?.rank !== "owner";
 }
+
+async function saveToolbarOrder(order) {
+  const previous = state.settings.toolbarOrder;
+  state.settings.toolbarOrder = order;
+  applySettings();
+  try {
+    const result = await api("/api/settings", { method: "PUT", body: { settings: state.settings } });
+    state.settings = result.settings;
+    state.account.settings = result.settings;
+    applySettings();
+  } catch (error) {
+    state.settings.toolbarOrder = previous;
+    applySettings();
+    toast(error.message);
+  }
+}
+
+const toolbarTools = $("#toolbar-tools");
+let draggedToolbarItem = "";
+toolbarTools.addEventListener("dragstart", (event) => {
+  if (!state.account?.permissions.includes("settings") || !state.account.features.includes("settings")) return;
+  const item = event.target.closest("[data-movable-toolbar-item]");
+  if (!item) return;
+  draggedToolbarItem = item.id;
+  event.dataTransfer.effectAllowed = "move";
+  event.dataTransfer.setData("text/plain", item.id);
+});
+toolbarTools.addEventListener("dragover", (event) => {
+  if (draggedToolbarItem && event.target.closest("[data-movable-toolbar-item]")) event.preventDefault();
+});
+toolbarTools.addEventListener("drop", (event) => {
+  const target = event.target.closest("[data-movable-toolbar-item]");
+  const dragged = document.getElementById(draggedToolbarItem);
+  if (!dragged || !target || dragged === target) return;
+  event.preventDefault();
+  const insertBefore = event.clientX < target.getBoundingClientRect().left + target.getBoundingClientRect().width / 2;
+  toolbarTools.insertBefore(dragged, insertBefore ? target : target.nextSibling);
+  const order = $$("[data-movable-toolbar-item]", toolbarTools).map((item) => item.id);
+  draggedToolbarItem = "";
+  void saveToolbarOrder(order);
+});
+toolbarTools.addEventListener("dragend", () => { draggedToolbarItem = ""; });
 
 async function heartbeat() {
   try {
@@ -604,13 +675,78 @@ function renderQuickLinks() {
     button.addEventListener("click", () => void navigate(item.url));
     root.append(button);
   }
+
+  function renderProjectAreas() {
+    const root = $("#project-area-list");
+    if (!state.projectAreas.length) {
+      root.innerHTML = '<p class="project-area-empty">No project areas yet. Add one for your Proxy, games, or another project.</p>';
+      return;
+    }
+    root.innerHTML = state.projectAreas.map((area) => `<article class="project-area-item"><div class="project-area-icon">${area.kind === "games" ? svg("games", 16) : svg("external", 16)}</div><div class="project-area-copy"><strong>${escapeHtml(area.label)}</strong><span>${escapeHtml(area.kind)} · private to your account</span></div><div class="project-area-actions"><button class="text-button" type="button" data-edit-project-area="${area.id}">Rename</button><button class="text-button danger-text" type="button" data-delete-project-area="${area.id}">Remove</button></div></article>`).join("");
+    $$("[data-edit-project-area]", root).forEach((button) => button.addEventListener("click", () => {
+      const area = state.projectAreas.find((item) => item.id === button.dataset.editProjectArea);
+      if (area) openProjectAreaDialog(area);
+    }));
+    $$("[data-delete-project-area]", root).forEach((button) => button.addEventListener("click", () => void deleteProjectArea(button.dataset.deleteProjectArea)));
+  }
+
+  async function loadProjectAreas() {
+    try {
+      const result = await api("/api/project-areas");
+      state.projectAreas = result.items;
+      renderProjectAreas();
+    } catch (error) {
+      $("#project-area-list").innerHTML = `<p class="project-area-empty">${escapeHtml(error.message)}</p>`;
+    }
+  }
+
+  function openProjectAreaDialog(area = null) {
+    const name = area?.name ?? "Proxy";
+    openDialog({
+      title: area ? "Edit project area" : "Add project area",
+      subtitle: "Only you can view and manage areas belonging to your account.",
+      content: `<form id="project-area-form" class="settings-grid"><label class="form-field"><span class="field-label">Area type</span><select class="field-select" name="kind"><option value="proxy">Proxy</option><option value="games">Games</option><option value="custom">Custom project</option></select></label><label class="form-field"><span class="field-label">Project name</span><input class="field-input" name="name" maxlength="50" required value="${escapeHtml(name)}"></label></form>`,
+      footer: `<span class="muted" style="font-size:9px">Displayed as ${escapeHtml(state.account.label)}'s [project name].</span><div class="dialog-footer-right"><button class="secondary-button" data-close-dialog type="button">Cancel</button><button id="save-project-area" class="primary-button" type="button">Save area</button></div>`,
+    });
+    const form = $("#project-area-form");
+    form.elements.kind.value = area?.kind ?? "proxy";
+    form.elements.kind.addEventListener("change", () => {
+      if (!area || ["Proxy", "games"].includes(form.elements.name.value)) {
+        form.elements.name.value = form.elements.kind.value === "proxy" ? "Proxy" : form.elements.kind.value === "games" ? "games" : "";
+      }
+    });
+    $("[data-close-dialog]").addEventListener("click", closeDialog);
+    $("#save-project-area").addEventListener("click", async () => {
+      if (!form.reportValidity()) return;
+      const body = { kind: form.elements.kind.value, name: form.elements.name.value.trim() };
+      try {
+        await api(area ? `/api/project-areas/${area.id}` : "/api/project-areas", {
+          method: area ? "PATCH" : "POST",
+          body,
+        });
+        closeDialog();
+        await loadProjectAreas();
+        toast(area ? "Project area updated." : "Project area created.");
+      } catch (error) { toast(error.message); }
+    });
+  }
+
+  async function deleteProjectArea(id) {
+    if (!confirm("Remove this private project area?")) return;
+    try {
+      await api(`/api/project-areas/${id}`, { method: "DELETE" });
+      await loadProjectAreas();
+      toast("Project area removed.");
+    } catch (error) { toast(error.message); }
+  }
 }
 
 async function refreshCapabilities() {
   try {
     state.capabilities = await api("/api/capabilities");
-    $("#assistant-open").hidden = !state.capabilities.ai.allowed;
-    $("#assistant-open").title = state.capabilities.ai.modelInstalled
+    const hasPermission = state.account?.permissions.includes("assistant") && state.account?.features.includes("assistant");
+    $("#assistant-open").hidden = !hasPermission;
+    $("#assistant-open").title = state.capabilities.ai.allowed && state.capabilities.ai.modelInstalled
       ? `Local AI · ${state.capabilities.ai.model}`
       : `Local AI · ${state.capabilities.ai.reason}`;
   } catch (error) {
@@ -914,6 +1050,7 @@ function settingsMarkup(settings) {
     </div></fieldset>
     <label class="form-field"><span class="field-label">Interface density</span><select class="field-select" name="density"><option value="compact">Compact</option><option value="comfortable">Comfortable</option><option value="spacious">Spacious</option></select></label>
     <label class="form-field"><span class="field-label">Default search provider</span><select class="field-select" name="searchProvider"><option value="duckduckgo">DuckDuckGo</option><option value="brave">Brave Search</option><option value="bing">Bing</option><option value="google">Google</option><option value="yandex">Yandex</option></select></label>
+    <div class="form-field wide-field customization-card"><span class="field-label">Workspace customization</span><label class="customization-input"><span>Browser tab title</span><input class="field-input" name="customTitle" maxlength="60" placeholder="Nightjar — your name"></label><label class="customization-input"><span>Tab icon (emoji or symbol)</span><input class="field-input" name="customIcon" maxlength="4" placeholder="🌙"></label><p class="table-secondary">Drag toolbar icons to rearrange them. Your order is saved to this account.</p></div>
     <label class="form-field"><span class="field-label">Homepage</span><select class="field-select" name="homepageType"><option value="home">Nightjar start page</option><option value="blank">Blank page</option><option value="custom">Custom address</option></select></label>
     <label class="form-field wide-field custom-home-field" ${homepageValue !== "custom" ? "hidden" : ""}><span class="field-label">Custom homepage address</span><input class="field-input" name="homepage" type="url" placeholder="https://example.com" value="${escapeHtml(customHomepage)}"></label>
     <div class="form-field wide-field"><span class="field-label">Accent color</span><div class="accent-presets" role="group" aria-label="Accent color presets">${[["#ff7048", "Coral"], ["#a78bfa", "Violet"], ["#52c7a5", "Jade"], ["#6ba8ff", "Blue"], ["#f08ab5", "Rose"]].map(([color, name]) => `<button type="button" class="accent-swatch${settings.accent.toLowerCase() === color ? " selected" : ""}" style="--swatch:${color}" data-accent="${color}" aria-label="${name} accent" aria-pressed="${settings.accent.toLowerCase() === color}"></button>`).join("")}<span class="accent-custom-label">Custom</span><div class="color-field"><input name="accentPicker" type="color" value="${escapeHtml(settings.accent)}" aria-label="Custom accent color"><input class="field-input" name="accent" value="${escapeHtml(settings.accent)}" maxlength="7" aria-label="Accent hex color"></div></div></div>
@@ -934,6 +1071,8 @@ function openSettings() {
   form.elements.theme.value = state.settings.theme;
   form.elements.density.value = state.settings.density;
   form.elements.searchProvider.value = state.settings.searchProvider;
+  form.elements.customTitle.value = state.settings.customTitle ?? "";
+  form.elements.customIcon.value = state.settings.customIcon ?? "";
   form.elements.homepageType.value = ["home", "blank"].includes(state.settings.homepage) ? state.settings.homepage : "custom";
   form.elements.homepage.value = ["home", "blank"].includes(state.settings.homepage) ? "" : state.settings.homepage;
   form.elements.accent.value = state.settings.accent;
@@ -979,6 +1118,9 @@ function openSettings() {
       searchProvider: form.elements.searchProvider.value,
       accent: form.elements.accent.value,
       customCursor: form.elements.customCursor.checked,
+      customTitle: form.elements.customTitle.value.trim(),
+      customIcon: form.elements.customIcon.value.trim(),
+      toolbarOrder: state.settings.toolbarOrder,
       privacy: { suppressReferrer: form.elements.suppressReferrer.checked, clearOnExit: form.elements.clearOnExit.checked },
     };
     try {
@@ -1276,9 +1418,14 @@ async function signOut(callServer = true) {
   closeDialog();
   state.account = null;
   state.csrf = "";
+  state.settings = { ...defaults, privacy: { ...defaults.privacy }, toolbarOrder: [...defaults.toolbarOrder] };
   state.tabs = [];
   state.activeId = null;
   state.bookmarks = [];
+  state.projectAreas = [];
+  $("#admin-link").hidden = true;
+  applySettings();
+  renderProjectAreas();
   state.assistantConversation = [];
   state.assistantBusy = false;
   sessionStorage.removeItem("nightjar.csrf");
@@ -1354,6 +1501,7 @@ $("#settings-open").addEventListener("click", openSettings);
 $("#theme-toggle").addEventListener("click", () => void cycleTheme());
 $("#help-open").addEventListener("click", openHelp);
 $("#games-open").addEventListener("click", openMathGame);
+$("#project-area-create").addEventListener("click", () => openProjectAreaDialog());
 $("#signout").addEventListener("click", () => {
   if (confirm("Sign out of this private workspace?")) void signOut(true);
 });
