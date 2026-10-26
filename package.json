@@ -7,12 +7,10 @@
     "node": ">=22.13"
   },
   "dependencies": {
-    "@mercuryworkshop/bare-mux": "2.1.9",
-    "@mercuryworkshop/epoxy-transport": "3.0.2",
-    "@mercuryworkshop/scramjet": "1.1.0",
-    "@mercuryworkshop/wisp-js": "0.5.0",
     "electron": "^45.0.0",
-    "express": "^5.1.0"
+    "express": "^5.1.0",
+    "rammerhead": "1.2.64",
+    "testcafe-hammerhead": "31.6.2"
   },
   "scripts": {
     "searcher": "electron desktop-searcher/main.js",

@@ -98,7 +98,7 @@ function renderMetrics() {
     ["Invitation storage", "Only SHA-256 token hashes are retained", "Secure", false],
     ["Session enforcement", "One live session per account · 12-hour idle and maximum age", "Active", false],
     ["Admin isolation", "Separate owner session cookie and protected endpoints", "Active", false],
-    ["Browser boundary", "Scramjet managed browsing on a separate origin with restricted Wisp networking", "Scoped", false],
+    ["Browser boundary", "Rammerhead on a separate origin; public HTTP(S) destinations and ports 80/443 only", "Scoped", false],
     ["Local AI assistant", `${state.summary.localAi.model} · auto-start ${state.summary.localAi.autoStart ? "enabled" : "disabled"} · ${state.summary.localAi.serviceStatus}`, state.summary.localAi.startedByApp ? "Started by Nightjar" : "Loopback only", !state.summary.localAi.autoStart],
     ["Desktop companion", state.desktopSession ? "Locally paired · no shell-command API" : "Manual start · loopback only · local approval", state.desktopSharing ? "Active" : "Not sharing", !state.desktopSession],
   ].map(([title, desc, status, warn]) => `<div class="security-item"><span class="security-icon${warn ? " warning" : ""}">${warn ? "!" : "✓"}</span><div class="security-copy"><strong>${esc(title)} · ${esc(status)}</strong><span>${esc(desc)}</span></div></div>`).join("");

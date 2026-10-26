@@ -5,9 +5,9 @@ Nightjar is a private, invitation-only browser workspace with original dark/ligh
 ## Included features
 
 - Browser-like workspace with tabs, HTTP(S) address/search, page titles, navigation, reload/stop, bookmarks, paginated history, recently closed tabs, homepage/search settings, keyboard shortcuts and session preferences. Bare terms and addresses without a recognized domain suffix use the selected search provider.
-- Scramjet-managed in-app browsing through a **separate origin and server port**. The main application and account cookies stay on the Nightjar origin. The Wisp transport is authenticated with a short-lived, session-bound grant; UDP, direct IPs, private/loopback addresses, and destination ports other than 80/443 are disabled.
+- Rammerhead-managed in-app browsing through a **separate origin and server port**. The main application and account cookies stay on the Nightjar origin. Each Rammerhead session is bound to an authenticated Nightjar session; outbound destinations are limited to public HTTP(S) hosts on ports 80/443, and private/reserved IP addresses are blocked.
 - Database-backed bookmarks, history, settings, support requests and suggestions. Each account’s permissions are checked server-side.
-- A polished Game lounge that opens the current GN Math site (`gn-math.dev`) in a fresh Scramjet-managed Nightjar tab, plus an original offline arithmetic sprint. The sprint sends no game data to the server; its personal-best score is saved in that browser profile.
+- A polished Game lounge that opens the current GN Math site (`gn-math.dev`) in a fresh Rammerhead-managed Nightjar tab, plus an original offline arithmetic sprint. The sprint sends no game data to the server; its personal-best score is saved in that browser profile.
 - Owner-only console and administration panel for accounts and their grants/settings, one-time invitations, permission ranks, live sessions, site-wide maintenance/invitation/AI controls, support/idea inbox, audit events and service status.
 - Basic, Standard and Full invitation ranks, plus owner-defined custom ranks. Ranks can only grant browser features; they cannot grant owner or desktop access. Removing a rank only removes it from future invitation choices; existing account permissions remain unchanged.
 - A small local **Nightjar Searcher** desktop app with an address/search bar, back/forward/reload/home controls, and Bing, Google, DuckDuckGo, Brave, or Yandex. It renders destination websites directly with Electron's Chromium engine on the user's PC, without a web proxy.
@@ -17,7 +17,7 @@ Nightjar is a private, invitation-only browser workspace with original dark/ligh
 
 ## Browser and device boundaries
 
-Scramjet uses its own managed frames internally; this replaces direct navigation of the raw external-page iframe. The Nightjar app remains on its own origin, while proxied pages run on the Scramjet origin. This is still a web application, not a native Chromium browser. Some sites, browser policies or unsupported browser APIs may not work exactly as they do in a desktop browser. Downloads are handled by the host browser.
+Rammerhead runs proxied pages on its own origin, separate from Nightjar's account origin. Outbound requests are restricted to public HTTP(S) destinations on ports 80/443; private and reserved IP ranges are denied. This is still a web application, not a native Chromium browser. Some sites, browser policies or unsupported browser APIs may not work exactly as they do in a desktop browser. Downloads are handled by the host browser.
 
 The web application does not control the host browser or access local files. An optional Linux companion is included for use from the owner console on the **same PC**. It binds only to `127.0.0.1` and starts only when manually launched. Pairing is one-click and authorized by the authenticated owner's HttpOnly session cookie plus CSRF-protected, short-lived, one-use signed ticket; there is no pairing code. While paired, the owner session cookie is revalidated every 15 seconds and the companion disconnects when that session becomes invalid. Screen sharing and mouse/keyboard input still require separate local terminal approval. It never enables system RDP, changes firewall rules, or provides a shell-command endpoint. The current preview uses repeated screenshots rather than smooth video; input is limited to pointer clicks, an allowlist of navigation keys, and short printable text. Owner-only desktop access is not available to invitation accounts.
 
@@ -32,7 +32,7 @@ npm ci
 npm run searcher
 ```
 
-The compact desktop window uses Electron's native Chromium renderer to visit websites directly. It does not use Scramjet, an iframe, a remote browsing service, or Nightjar's invitation session. The selected search engine is remembered on that computer. Bare words and addresses without a recognized domain suffix are searches; recognized domains and explicit HTTP(S) URLs open as websites. `Ctrl+L` focuses the address bar. Each person who wants the desktop app must run it on their own PC; a website cannot remotely launch Chromium on a visitor's device.
+The compact desktop window uses Electron's native Chromium renderer to visit websites directly. It does not use Rammerhead, an iframe, a remote browsing service, or Nightjar's invitation session. The selected search engine is remembered on that computer. Bare words and addresses without a recognized domain suffix are searches; recognized domains and explicit HTTP(S) URLs open as websites. `Ctrl+L` focuses the address bar. Each person who wants the desktop app must run it on their own PC; a website cannot remotely launch Chromium on a visitor's device.
 
 This small searcher is intentionally separate from the full web owner console. It provides page navigation and search, not account administration, bookmarks, history synchronization, or the local assistant. Search engines and destination websites receive requests directly from the user's computer and apply their own privacy policies. The existing web workspace remains available for its account and owner features.
 
@@ -50,7 +50,7 @@ This small searcher is intentionally separate from the full web owner console. I
 4. Install the project dependencies with `npm ci`.
 5. Run `npm start` and open `http://127.0.0.1:4173`.
 
-`npm start` compiles the typed Scramjet shell and runs both local listeners in one process: the Nightjar app on port `4173` and the Scramjet/Wisp server on `4174`. Keep both running. Ollama is started by Nightjar when configured and available; it is not a separate terminal requirement. For a local model that is not installed yet, install it yourself with `ollama pull qwen3:4b`. Set `OLLAMA_AUTOSTART=0` if the app should not start Ollama.
+`npm start` compiles the typed Rammerhead shell and runs both local listeners in one process: the Nightjar app on port `4173` and the Rammerhead service on `4174`. Keep both running. Ollama is started by Nightjar when configured and available; it is not a separate terminal requirement. For a local model that is not installed yet, install it yourself with `ollama pull qwen3:4b`. Set `OLLAMA_AUTOSTART=0` if the app should not start Ollama.
 
 To enable the desktop companion, add a new random 32-byte hex secret to `.env`:
 
@@ -87,10 +87,10 @@ Create custom ranks with `ranks create "Study group" --permissions browse,games,
 |---|---|---|
 | `HOST` | `127.0.0.1` | Nightjar app bind address. Keep local unless using a properly secured HTTPS deployment. |
 | `PORT` | `4173` | Nightjar app port. |
-| `SCRAMJET_HOST` | `127.0.0.1` | Scramjet/Wisp bind address. |
-| `SCRAMJET_PORT` | `4174` | Scramjet/Wisp port. |
-| `APP_ORIGIN` | inferred for local development | Exact public Nightjar origin allowed to embed the Scramjet shell. Required in production. |
-| `SCRAMJET_ORIGIN` | local origin from host/port | Exact public Scramjet origin, with no path. Required in production. It must be different from `APP_ORIGIN`. |
+| `RAMMERHEAD_HOST` | `127.0.0.1` | Rammerhead bind address. |
+| `RAMMERHEAD_PORT` | `4174` | Rammerhead service port. |
+| `APP_ORIGIN` | inferred for local development | Exact public Nightjar origin allowed to embed the Rammerhead shell. Required in production. |
+| `RAMMERHEAD_ORIGIN` | local origin from host/port | Exact public Rammerhead origin, with no path. Required in production. It must be different from `APP_ORIGIN`. |
 | `NODE_ENV` | `development` | Set to `production` behind HTTPS; production cookies use `Secure`. |
 | `DATABASE_PATH` | `./data/nightjar.sqlite` | SQLite database path. |
 | `ADMIN_INITIAL_PASSWORD` | unset | Required to initialize a new owner database; minimum 16 characters. |
@@ -99,11 +99,11 @@ Create custom ranks with `ranks create "Study group" --permissions browse,games,
 | `OLLAMA_MODEL` | `qwen3:4b` | Installed local model used by the assistant. |
 | `OLLAMA_BINARY` | search `PATH` | Optional executable path/name for local Ollama. |
 
-`.env` is ignored by Git. `.env.example` contains placeholders only. Do not expose the app, Wisp server or Ollama API directly to the public Internet.
+`.env` is ignored by Git. `.env.example` contains placeholders only. `SCRAMJET_HOST`, `SCRAMJET_PORT`, and `SCRAMJET_ORIGIN` remain accepted as legacy aliases. Do not expose the app, Rammerhead server or Ollama API directly to the public Internet.
 
 ### Reverse-proxy deployment
 
-Use two distinct HTTPS origins, such as `https://nightjar.example.com` and `https://browse.example.com`. Set `APP_ORIGIN` and `SCRAMJET_ORIGIN` to those exact origins, configure the reverse proxy to forward WebSocket upgrades for the Scramjet origin, and keep the Scramjet service inaccessible except through the trusted proxy. Do not put both services behind the same origin: proxied site scripts must not share Nightjar’s account origin. The local defaults are for single-machine development only.
+Use two distinct HTTPS origins, such as `https://nightjar.example.com` and `https://browse.example.com`. Set `APP_ORIGIN` and `RAMMERHEAD_ORIGIN` to those exact origins, configure the reverse proxy to forward WebSocket upgrades for the Rammerhead origin, and keep the Rammerhead service inaccessible except through the trusted proxy. Do not put both services behind the same origin: proxied site scripts must not share Nightjar’s account origin. The local defaults are for single-machine development only.
 
 ## Tokens, ranks and sessions
 
@@ -127,7 +127,7 @@ Custom ranks are configurable from the Owner console. Rank permissions are copie
 
 Users with the support capability can send a request or suggestion from the in-app Help guide. Messages are stored in the Nightjar database and shown only in the owner’s **Support & ideas** panel; they are not emailed or sent to a third party. The owner can mark them open, in progress or resolved.
 
-The **Game lounge** toolbar opens GN Math (`https://gn-math.dev`) in a new tab through the existing separate-origin Scramjet browsing surface; Nightjar does not copy or host GN Math game assets. The lounge also offers the original 60-second arithmetic sprint, which works locally and keeps only its personal-best score in that browser profile. GN Math is external web content and remains subject to its availability and compatibility with proxy browsing.
+The **Game lounge** toolbar opens GN Math (`https://gn-math.dev`) in a new tab through the existing separate-origin Rammerhead browsing surface; Nightjar does not copy or host GN Math game assets. The lounge also offers the original 60-second arithmetic sprint, which works locally and keeps only its personal-best score in that browser profile. GN Math is external web content and remains subject to its availability and compatibility with proxy browsing.
 
 ## Database, migrations and recovery
 
@@ -145,8 +145,8 @@ npm test
 
 The tests use a temporary SQLite database and mock local Ollama responses; they do not download a model or generate model output. They cover administrator isolation, token hashing/one-time redemption, cookie sessions, concurrent-session revocation, permissions, ranks and renewal commands, browser grant issuance, proxy asset isolation, bookmarks/history/settings, local-AI authorization, and TOTP.
 
-- **Port already in use:** another Nightjar instance may already be running. Do not start a second copy; stop the existing instance from its own terminal or change both `PORT` and `APP_ORIGIN`, and both `SCRAMJET_PORT` and `SCRAMJET_ORIGIN`.
-- **Scramjet page does not open:** check the Nightjar log for “Scramjet browsing engine is ready”, confirm `SCRAMJET_PORT` is reachable from the browser, and ensure the app and proxy have distinct origins. Some sites remain incompatible with web-based proxying.
+- **Port already in use:** another Nightjar instance may already be running. Do not start a second copy; stop the existing instance from its own terminal or change both `PORT` and `APP_ORIGIN`, and both `RAMMERHEAD_PORT` and `RAMMERHEAD_ORIGIN`.
+- **Rammerhead page does not open:** check the Nightjar log for “Rammerhead browsing engine is ready”, confirm `RAMMERHEAD_PORT` is reachable from the browser, and ensure the app and proxy have distinct origins. Some sites remain incompatible with web-based proxying.
 - **Invitation is rejected:** check expiry/revocation/redemption status in the Owner console. A redeemed token cannot sign in again; issue a replacement for the existing account.
 - **Account was signed in elsewhere:** another valid invitation was redeemed while its account had a live session. The account’s invitations and session are revoked; issue a new invitation after verifying the intended account/device.
 - **Support or games are missing:** the account rank may not include those capabilities; the owner can issue a replacement invitation with a suitable rank.

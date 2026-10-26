@@ -1,5 +1,7 @@
 import { createServer } from "node:http";
 import { isIP } from "node:net";
+import { lookup as dnsLookup } from "node:dns/promises";
+import { createRequire } from "node:module";
 import { readFile, mkdir } from "node:fs/promises";
 import { dirname, extname, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -12,11 +14,14 @@ import { constants as fsConstants } from "node:fs";
 import { createInterface } from "node:readline";
 import { DatabaseSync } from "node:sqlite";
 import express from "express";
-import { server as wisp } from "@mercuryworkshop/wisp-js/server";
 
 const scrypt = promisify(scryptCallback);
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const PUBLIC_ROOT = resolve(ROOT, "public");
+const require = createRequire(import.meta.url);
+const { RammerheadProxy, RammerheadSession, RammerheadJSMemCache } = require("rammerhead");
+const { parseProxyUrl } = require("testcafe-hammerhead");
+const destinationRequestAgent = require("testcafe-hammerhead/lib/request-pipeline/destination-request/agent");
 const SESSION_COOKIE = "nj_session";
 const ADMIN_SESSION_COOKIE = "nj_admin";
 const MAX_BODY_BYTES = 64 * 1024;
@@ -66,6 +71,71 @@ const MIME_TYPES = {
   ".svg": "image/svg+xml",
   ".ico": "image/x-icon",
   ".wasm": "application/wasm",
+};
+
+export function isPublicAddress(address) {
+  const family = isIP(address);
+  if (family === 4) {
+    const octets = address.split(".").map(Number);
+    const value = octets.reduce((result, octet) => (result << 8) | octet, 0) >>> 0;
+    const blockedRanges = [
+      [0x00000000, 0x00ffffff], [0x0a000000, 0x0affffff], [0x64400000, 0x647fffff],
+      [0x7f000000, 0x7fffffff], [0xa9fe0000, 0xa9feffff], [0xac100000, 0xac1fffff],
+      [0xc0000000, 0xc00000ff], [0xc0000200, 0xc00002ff], [0xc0586300, 0xc05863ff],
+      [0xc0a80000, 0xc0a8ffff], [0xc6120000, 0xc613ffff], [0xc6336400, 0xc63364ff],
+      [0xcb007100, 0xcb0071ff], [0xe0000000, 0xffffffff],
+    ];
+    return !blockedRanges.some(([start, end]) => value >= start && value <= end);
+  }
+  if (family !== 6) return false;
+  const normalized = address.toLowerCase().split("%")[0];
+  const mapped = normalized.match(/^(?:::ffff:)(\d{1,3}(?:\.\d{1,3}){3})$/);
+  if (mapped) return isPublicAddress(mapped[1]);
+  const withoutIpv4 = normalized.replace(/(\d{1,3}\.){3}\d{1,3}$/, (ipv4) => {
+    const octets = ipv4.split(".").map(Number);
+    return `${((octets[0] << 8) | octets[1]).toString(16)}:${((octets[2] << 8) | octets[3]).toString(16)}`;
+  });
+  const halves = withoutIpv4.split("::");
+  if (halves.length > 2) return false;
+  const left = halves[0] ? halves[0].split(":") : [];
+  const right = halves[1] ? halves[1].split(":") : [];
+  if (halves.length === 1 && left.length !== 8) return false;
+  const missing = 8 - left.length - right.length;
+  if (missing < 0 || (halves.length === 2 && missing < 1)) return false;
+  const words = [...left, ...Array(missing).fill("0"), ...right].map((word) => Number.parseInt(word, 16));
+  if (words.length !== 8 || words.some((word) => !Number.isInteger(word) || word < 0 || word > 0xffff)) return false;
+  const mappedV4 = words.slice(0, 5).every((word) => word === 0) && words[5] === 0xffff;
+  if (mappedV4) return isPublicAddress(`${words[6] >> 8}.${words[6] & 255}.${words[7] >> 8}.${words[7] & 255}`);
+  return words[0] >= 0x2000 && words[0] <= 0x3fff &&
+    !(words[0] === 0x2001 && words[1] <= 0x01ff) &&
+    !(words[0] === 0x2001 && words[1] === 0x0db8) &&
+    !(words[0] === 0x3fff && words[1] <= 0x0fff) &&
+    words[0] !== 0x2002;
+}
+
+export function restrictedLookup(hostname, options, callback) {
+  if (typeof options === "function") {
+    callback = options;
+    options = {};
+  }
+  void dnsLookup(hostname, { all: true, verbatim: true }).then((addresses) => {
+    const family = options?.family ?? 0;
+    const matches = addresses.filter((entry) => !family || entry.family === family);
+    if (!addresses.length || addresses.some((entry) => !isPublicAddress(entry.address)) || !matches.length) {
+      const error = new Error("Rammerhead cannot connect to private or reserved network addresses.");
+      error.code = "EACCES";
+      callback(error);
+      return;
+    }
+    if (options?.all) callback(null, matches);
+    else callback(null, matches[0].address, matches[0].family);
+  }).catch((error) => callback(error));
+}
+
+const originalDestinationAgentAssign = destinationRequestAgent.assign;
+destinationRequestAgent.assign = (options) => {
+  originalDestinationAgentAssign(options);
+  if (!options.proxy) options.lookup = restrictedLookup;
 };
 
 class HttpError extends Error {
@@ -680,15 +750,15 @@ export async function createApp(options = {}) {
     secureCookie: options.secureCookie ?? env("NODE_ENV", "development") === "production",
     serverVersion: "1.0.0",
   };
-  const proxyHost = options.proxyHost ?? env("SCRAMJET_HOST", "127.0.0.1");
-  const configuredProxyOrigin = options.proxyOrigin ?? env("SCRAMJET_ORIGIN", "");
+  const proxyHost = options.proxyHost ?? env("RAMMERHEAD_HOST", env("SCRAMJET_HOST", "127.0.0.1"));
+  const configuredProxyOrigin = options.proxyOrigin ?? env("RAMMERHEAD_ORIGIN", env("SCRAMJET_ORIGIN", ""));
   const configuredAppOrigin = options.appOrigin ?? env("APP_ORIGIN", "");
-  const proxyPort = Number(options.proxyPort ?? env("SCRAMJET_PORT", "4174"));
+  const proxyPort = Number(options.proxyPort ?? env("RAMMERHEAD_PORT", env("SCRAMJET_PORT", "4174")));
   if (!Number.isInteger(proxyPort) || proxyPort < 0 || proxyPort > 65535) {
     db.close();
-    throw new Error("SCRAMJET_PORT must be an integer from 0 to 65535.");
+    throw new Error("RAMMERHEAD_PORT must be an integer from 0 to 65535.");
   }
-  for (const [name, value] of [["SCRAMJET_ORIGIN", configuredProxyOrigin], ["APP_ORIGIN", configuredAppOrigin]]) {
+  for (const [name, value] of [["RAMMERHEAD_ORIGIN", configuredProxyOrigin], ["APP_ORIGIN", configuredAppOrigin]]) {
     if (!value) continue;
     try {
       const parsed = new URL(value);
@@ -700,19 +770,25 @@ export async function createApp(options = {}) {
   }
   if ((options.production ?? env("NODE_ENV", "development") === "production") && !configuredProxyOrigin) {
     db.close();
-    throw new Error("SCRAMJET_ORIGIN must be configured for production so proxied sites stay isolated from the application origin.");
+    throw new Error("RAMMERHEAD_ORIGIN must be configured for production so proxied sites stay isolated from the application origin.");
   }
   if ((options.production ?? env("NODE_ENV", "development") === "production") && !configuredAppOrigin) {
     db.close();
-    throw new Error("APP_ORIGIN must be configured for production to restrict the Scramjet shell's embedding origin.");
+    throw new Error("APP_ORIGIN must be configured for production to restrict the Rammerhead shell's embedding origin.");
   }
   const proxyOrigin = () => configuredProxyOrigin || `http://${proxyHost}:${proxyServer?.address()?.port ?? proxyPort}`;
-  const proxyGrants = new Map();
+  const rammerheadSessions = new Map();
   const proxySockets = new Map();
   const proxyMaintenanceTimer = setInterval(() => {
     const now = Date.now();
-    for (const [grantHash, grant] of proxyGrants) {
-      if (grant.expiresAt <= now) proxyGrants.delete(grantHash);
+    for (const [engineSessionId, record] of rammerheadSessions) {
+      const live = db.prepare("SELECT last_seen_at, expires_at FROM sessions WHERE id = ? AND principal = 'user'").get(record.userSessionId);
+      if (
+        record.expiresAt <= now ||
+        !live ||
+        Date.parse(live.expires_at) <= now ||
+        now - Date.parse(live.last_seen_at) > SESSION_IDLE_MS
+      ) closeProxySession(record.userSessionId);
     }
     for (const sessionId of proxySockets.keys()) {
       const live = db.prepare("SELECT last_seen_at, expires_at FROM sessions WHERE id = ? AND principal = 'user'").get(sessionId);
@@ -722,15 +798,24 @@ export async function createApp(options = {}) {
   proxyMaintenanceTimer.unref();
   let server;
   let proxyServer;
-  wisp.options.allow_udp_streams = false;
-  wisp.options.allow_tcp_streams = true;
-  wisp.options.allow_private_ips = false;
-  wisp.options.allow_loopback_ips = false;
-  wisp.options.allow_direct_ip = false;
-  wisp.options.port_whitelist = [80, 443];
-  // Wisp 0.5 treats its stream map as an iterable in this filter; total streams remain bounded below.
-  wisp.options.stream_limit_per_host = -1;
-  wisp.options.stream_limit_total = 32;
+  const rammerhead = new RammerheadProxy({
+    bindingAddress: proxyHost,
+    port: proxyPort,
+    crossDomainPort: null,
+    dontListen: true,
+    disableHttp2: true,
+    jsCache: new RammerheadJSMemCache(50 * 1024 * 1024),
+    getServerInfo(req) {
+      const requestOrigin = new URL(`${req.socket.encrypted ? "https" : "http"}://${req.headers.host}`);
+      const externalOrigin = configuredProxyOrigin ? new URL(configuredProxyOrigin) : requestOrigin;
+      return {
+        hostname: externalOrigin.hostname,
+        port: Number(externalOrigin.port || (externalOrigin.protocol === "https:" ? 443 : 80)),
+        crossDomainPort: Number(externalOrigin.port || (externalOrigin.protocol === "https:" ? 443 : 80)),
+        protocol: externalOrigin.protocol,
+      };
+    },
+  });
   const aiModel = options.aiModel ?? env("OLLAMA_MODEL", "qwen3:4b");
   const ollamaFetch = options.ollamaFetch ?? globalThis.fetch;
   if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$/.test(aiModel)) {
@@ -934,12 +1019,84 @@ export async function createApp(options = {}) {
   function closeProxySession(sessionId) {
     const sockets = proxySockets.get(sessionId);
     if (sockets) {
-      for (const socket of sockets.items) socket.destroy();
+      for (const socket of sockets) socket.destroy();
       proxySockets.delete(sessionId);
     }
-    for (const [grantHash, grant] of proxyGrants) {
-      if (grant.sessionId === sessionId) proxyGrants.delete(grantHash);
+    for (const [engineSessionId, record] of rammerheadSessions) {
+      if (record.userSessionId !== sessionId) continue;
+      const engineSession = rammerhead.openSessions.get(engineSessionId);
+      if (engineSession) rammerhead.closeSession(engineSession);
+      rammerheadSessions.delete(engineSessionId);
     }
+  }
+
+  function rammerheadSessionId(req, requestUrl) {
+    const direct = parseProxyUrl(new URL(req.url, proxyOrigin()).href)?.sessionId;
+    if (direct) return direct;
+    const querySessionId = requestUrl.searchParams.get("sessionId") ?? requestUrl.searchParams.get("id");
+    if (querySessionId && /^[a-f0-9]{32}$/i.test(querySessionId)) return querySessionId;
+    const referer = req.headers.referer;
+    if (!referer) return null;
+    try {
+      return parseProxyUrl(referer)?.sessionId ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  function authorizedRammerheadSession(req, requestUrl) {
+    const engineSessionId = rammerheadSessionId(req, requestUrl);
+    const record = engineSessionId && rammerheadSessions.get(engineSessionId);
+    if (!record || record.expiresAt <= Date.now()) return null;
+    const session = db.prepare(`SELECT s.id, s.last_seen_at, s.expires_at, a.revoked_at, a.permissions_json,
+      t.revoked_at AS token_revoked_at, t.expires_at AS token_expires_at
+      FROM sessions s JOIN accounts a ON a.id = s.account_id JOIN tokens t ON t.id = s.token_id
+      WHERE s.id = ? AND s.principal = 'user'`).get(record.userSessionId);
+    if (
+      !session ||
+      session.revoked_at ||
+      session.token_revoked_at ||
+      (session.token_expires_at && Date.parse(session.token_expires_at) <= Date.now()) ||
+      Date.parse(session.expires_at) <= Date.now() ||
+      Date.now() - Date.parse(session.last_seen_at) > SESSION_IDLE_MS ||
+      !safeJson(session.permissions_json, []).includes("browse") ||
+      getSiteControls().maintenanceMode
+    ) return null;
+    return { engineSessionId, userSessionId: record.userSessionId };
+  }
+
+  function allowedRammerheadDestination(requestUrl) {
+    const parsed = parseProxyUrl(requestUrl.href);
+    if (!parsed?.destUrl) {
+      return new Set([
+        "/api/shuffleDict", "/hammerhead.js", "/iframe-task.js", "/mainport",
+        "/messaging", "/rammerhead.js", "/sessionexists", "/syncLocalStorage",
+        "/task.js", "/transport-worker.js", "/worker-hammerhead.js",
+      ]).has(requestUrl.pathname);
+    }
+    let destination;
+    try {
+      destination = new URL(parsed.destUrl);
+    } catch {
+      return false;
+    }
+    if (!["http:", "https:"].includes(destination.protocol) || destination.username || destination.password) return false;
+    if (destination.port && !["80", "443"].includes(destination.port)) return false;
+    const hostname = destination.hostname.toLowerCase().replace(/^\[|\]$/g, "").replace(/\.$/, "");
+    if (hostname === "localhost" || hostname.endsWith(".localhost") || hostname.endsWith(".local") || hostname.endsWith(".internal")) return false;
+    return !isIP(hostname) || isPublicAddress(hostname);
+  }
+
+  function trackProxySocket(userSessionId, socket) {
+    const sockets = proxySockets.get(userSessionId) ?? new Set();
+    if (!sockets.has(socket) && sockets.size >= 128) return false;
+    sockets.add(socket);
+    proxySockets.set(userSessionId, sockets);
+    socket.once("close", () => {
+      sockets.delete(socket);
+      if (!sockets.size) proxySockets.delete(userSessionId);
+    });
+    return true;
   }
 
   function getSiteControls() {
@@ -1141,13 +1298,14 @@ export async function createApp(options = {}) {
       requireCsrf(req, user);
       validateOrigin(req);
       if (!req.headers.origin) throw new HttpError(403, "A same-origin browser request is required.", "origin_rejected");
-      const grant = randomBytes(32).toString("base64url");
-      const grantHash = hash(grant);
-      proxyGrants.set(grantHash, {
-        sessionId: user.id,
+      const engineSessionId = randomBytes(16).toString("hex");
+      const engineSession = new RammerheadSession({ id: engineSessionId, disableShuffling: true });
+      rammerhead.openSessions.set(engineSessionId, engineSession);
+      rammerheadSessions.set(engineSessionId, {
+        userSessionId: user.id,
         expiresAt: Date.now() + SESSION_MAX_AGE_MS,
       });
-      sendJson(res, 200, { grant, proxyOrigin: proxyOrigin() });
+      sendJson(res, 200, { sessionId: engineSessionId, proxyOrigin: proxyOrigin() });
       return;
     }
 
@@ -1849,37 +2007,56 @@ export async function createApp(options = {}) {
   async function routeProxy(req, res) {
     const url = new URL(req.url, proxyOrigin());
     try {
-      if (!["GET", "HEAD"].includes(req.method)) throw new HttpError(405, "Method not allowed.");
       const filePath = proxyAssetPath(url.pathname);
-      const data = await readFile(filePath);
-      const extension = extname(filePath);
-      res.setHeader("Content-Type", MIME_TYPES[extension] ?? "application/octet-stream");
-      res.setHeader("X-Content-Type-Options", "nosniff");
-      res.setHeader("Referrer-Policy", "no-referrer");
-      res.setHeader("Cross-Origin-Resource-Policy", "same-origin");
-      res.setHeader("Cache-Control", extension === ".html" ? "no-store" : "public, max-age=3600");
-      if (extension === ".html") {
-        const appPort = server?.address()?.port ?? Number(env("PORT", "4173"));
-        const appOrigins = configuredAppOrigin
-          ? configuredAppOrigin
-          : [`http://127.0.0.1:${appPort}`, `http://localhost:${appPort}`].join(" ");
-        res.setHeader("Content-Security-Policy", [
-          "default-src 'self'",
-          "base-uri 'self'",
-          "object-src 'none'",
-          "form-action 'self'",
-          `frame-ancestors ${appOrigins}`,
-          "frame-src 'self' data: blob:",
-          "img-src 'self' data: blob: https: http:",
-          "font-src 'self' data: https: http:",
-          "style-src 'self' 'unsafe-inline'",
-          "script-src 'self' 'unsafe-eval' 'sha256-YOor7VYcglFdKUc0YXTT9tDRe3nHGs6MXznzTO1OHkA='",
-          "connect-src 'self' ws: wss: https: http:",
-          "worker-src 'self' blob:",
-        ].join("; "));
+      if (filePath) {
+        if (!["GET", "HEAD"].includes(req.method)) throw new HttpError(405, "Method not allowed.");
+        const data = await readFile(filePath);
+        const extension = extname(filePath);
+        res.setHeader("Content-Type", MIME_TYPES[extension] ?? "application/octet-stream");
+        res.setHeader("X-Content-Type-Options", "nosniff");
+        res.setHeader("Referrer-Policy", "no-referrer");
+        res.setHeader("Cross-Origin-Resource-Policy", "same-origin");
+        res.setHeader("Cache-Control", extension === ".html" ? "no-store" : "public, max-age=3600");
+        if (extension === ".html") {
+          const appPort = server?.address()?.port ?? Number(env("PORT", "4173"));
+          const appOrigins = configuredAppOrigin
+            ? configuredAppOrigin
+            : [`http://127.0.0.1:${appPort}`, `http://localhost:${appPort}`].join(" ");
+          res.setHeader("Content-Security-Policy", [
+            "default-src 'self'",
+            "base-uri 'self'",
+            "object-src 'none'",
+            "form-action 'self'",
+            `frame-ancestors ${appOrigins}`,
+            "frame-src 'self' data: blob:",
+            "img-src 'self' data: blob: https: http:",
+            "font-src 'self' data: https: http:",
+            "style-src 'self' 'unsafe-inline'",
+            "script-src 'self'",
+            "connect-src 'self' ws: wss: https: http:",
+            "worker-src 'self' blob:",
+          ].join("; "));
+        }
+        res.statusCode = 200;
+        res.end(req.method === "HEAD" ? undefined : data);
+        return;
       }
-      res.statusCode = 200;
-      res.end(req.method === "HEAD" ? undefined : data);
+
+      const authorized = authorizedRammerheadSession(req, url);
+      if (!authorized || !allowedRammerheadDestination(url)) {
+        throw new HttpError(403, "This Rammerhead request is not authorized.", "proxy_request_rejected");
+      }
+      if (!trackProxySocket(authorized.userSessionId, req.socket)) {
+        throw new HttpError(429, "Too many concurrent Rammerhead connections.", "proxy_connection_limit");
+      }
+      const pending = rammerhead._onRequest(req, res, rammerhead.server1Info);
+      if (pending?.catch) pending.catch((error) => {
+        console.error(JSON.stringify({ level: "error", message: error.message, path: url.pathname, method: req.method }));
+        if (!res.headersSent) {
+          res.statusCode = 502;
+          res.end("The Rammerhead request failed.");
+        }
+      });
     } catch (error) {
       const known = error instanceof HttpError;
       if (!known) console.error(JSON.stringify({ level: "error", message: error.message, path: url.pathname, method: req.method }));
@@ -1896,66 +2073,27 @@ export async function createApp(options = {}) {
       ["/proxy-shell.html", resolve(PUBLIC_ROOT, "proxy-shell.html")],
       ["/proxy-shell.css", resolve(PUBLIC_ROOT, "proxy-shell.css")],
       ["/dist/proxy-shell.js", resolve(PUBLIC_ROOT, "dist/proxy-shell.js")],
-      ["/sw.js", resolve(PUBLIC_ROOT, "sw.js")],
-      ["/scram/scramjet.bundle.js", resolve(ROOT, "node_modules/@mercuryworkshop/scramjet/dist/scramjet.bundle.js")],
-      ["/scram/scramjet.all.js", resolve(ROOT, "node_modules/@mercuryworkshop/scramjet/dist/scramjet.all.js")],
-      ["/scram/scramjet.sync.js", resolve(ROOT, "node_modules/@mercuryworkshop/scramjet/dist/scramjet.sync.js")],
-      ["/scram/scramjet.wasm.wasm", resolve(ROOT, "node_modules/@mercuryworkshop/scramjet/dist/scramjet.wasm.wasm")],
-      ["/baremux/worker.js", resolve(ROOT, "node_modules/@mercuryworkshop/bare-mux/dist/worker.js")],
-      ["/baremux/index.mjs", resolve(ROOT, "node_modules/@mercuryworkshop/bare-mux/dist/index.mjs")],
-      ["/epoxy/index.mjs", resolve(ROOT, "node_modules/@mercuryworkshop/epoxy-transport/dist/index.mjs")],
     ]);
-    const filePath = assets.get(pathname);
-    if (!filePath) throw new HttpError(404, "Not found.", "not_found");
-    return filePath;
+    return assets.get(pathname) ?? null;
   }
 
   proxyServer.on("upgrade", (req, socket, head) => {
-    const url = new URL(req.url, proxyOrigin());
-    const origin = req.headers.origin;
-    const grantParameter = url.searchParams.get("grant");
-    const grant = typeof grantParameter === "string" && grantParameter.endsWith("/")
-      ? grantParameter.slice(0, -1)
-      : grantParameter ?? "";
-    const record = proxyGrants.get(hash(grant));
-    const sessionRow = record && record.expiresAt > Date.now()
-      ? db.prepare(`SELECT s.id, s.account_id, s.last_seen_at, s.expires_at, a.revoked_at
-        FROM sessions s JOIN accounts a ON a.id = s.account_id
-        WHERE s.id = ? AND s.principal = 'user'`).get(record.sessionId)
-      : null;
-    if (
-      url.pathname !== "/wisp/" ||
-      !record ||
-      record.expiresAt <= Date.now() ||
-      !sessionRow ||
-      sessionRow.revoked_at ||
-      Date.now() - Date.parse(sessionRow.last_seen_at) > SESSION_IDLE_MS ||
-      Date.parse(sessionRow.expires_at) <= Date.now() ||
-      origin !== proxyOrigin()
-    ) {
-      socket.destroy();
-      return;
-    }
     try {
-      consumeLimit(`wisp:${clientAddress(req)}`, 100, 60_000);
-    } catch {
-      socket.destroy();
-      return;
-    }
-    const sessionSockets = proxySockets.get(sessionRow.id) ?? { accountId: sessionRow.account_id, items: new Set() };
-    if (sessionSockets.items.size >= 8) {
-      socket.destroy();
-      return;
-    }
-    sessionSockets.items.add(socket);
-    proxySockets.set(sessionRow.id, sessionSockets);
-    socket.once("close", () => {
-      sessionSockets.items.delete(socket);
-      if (!sessionSockets.items.size) proxySockets.delete(sessionRow.id);
-    });
-    try {
-      req.url = "/wisp/";
-      wisp.routeRequest(req, socket, head);
+      const url = new URL(req.url, proxyOrigin());
+      const authorized = authorizedRammerheadSession(req, url);
+      if (!authorized || !allowedRammerheadDestination(url)) {
+        socket.destroy();
+        return;
+      }
+      if (!trackProxySocket(authorized.userSessionId, socket)) {
+        socket.destroy();
+        return;
+      }
+      const pending = rammerhead._onUpgradeRequest(req, socket, head, rammerhead.server1Info);
+      if (pending?.catch) pending.catch((error) => {
+        console.error(JSON.stringify({ level: "error", message: error.message, path: url.pathname, method: req.method }));
+        socket.destroy();
+      });
     } catch {
       socket.destroy();
     }
@@ -1968,6 +2106,7 @@ export async function createApp(options = {}) {
     stop() {
       clearInterval(proxyMaintenanceTimer);
       for (const sessionId of proxySockets.keys()) closeProxySession(sessionId);
+      for (const sessionId of rammerheadSessions.values()) closeProxySession(sessionId.userSessionId);
       if (ollamaChild) {
         ollamaChild.kill("SIGTERM");
         ollamaChild = null;
@@ -1996,8 +2135,9 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
       });
     });
   };
-  app.proxyServer.listen(Number(env("SCRAMJET_PORT", "4174")), env("SCRAMJET_HOST", "127.0.0.1"), () => {
-    console.info(JSON.stringify({ level: "info", message: "Scramjet browsing engine is ready", host: env("SCRAMJET_HOST", "127.0.0.1"), port: app.proxyServer.address().port, origin: env("SCRAMJET_ORIGIN", `http://${env("SCRAMJET_HOST", "127.0.0.1")}:${app.proxyServer.address().port}`) }));
+  const proxyHost = env("RAMMERHEAD_HOST", env("SCRAMJET_HOST", "127.0.0.1"));
+  app.proxyServer.listen(Number(env("RAMMERHEAD_PORT", env("SCRAMJET_PORT", "4174"))), proxyHost, () => {
+    console.info(JSON.stringify({ level: "info", message: "Rammerhead browsing engine is ready", host: proxyHost, port: app.proxyServer.address().port, origin: env("RAMMERHEAD_ORIGIN", env("SCRAMJET_ORIGIN", `http://${proxyHost}:${app.proxyServer.address().port}`)) }));
   });
   app.server.listen(port, host, () => {
     console.info(JSON.stringify({ level: "info", message: "Nightjar is ready", host, port, database: resolve(env("DATABASE_PATH", resolve(ROOT, "data/nightjar.sqlite"))) }));

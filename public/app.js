@@ -66,7 +66,7 @@ const state = {
   pageLoading: false,
   pageFrameRequestedUrl: "",
   proxyOrigin: "",
-  proxyGrant: "",
+  proxySessionId: "",
   proxyReady: false,
   gameTimer: 0,
   game: null,
@@ -230,7 +230,8 @@ async function prepareProxyShell() {
     const result = await api("/api/browser/grant", { method: "POST", body: {} });
     if (!/^https?:\/\/[^/]+$/.test(result.proxyOrigin)) throw new Error("The private browsing engine returned an invalid origin.");
     state.proxyOrigin = result.proxyOrigin;
-    state.proxyGrant = result.grant;
+    if (!/^[a-f0-9]{32}$/i.test(result.sessionId)) throw new Error("The Rammerhead engine returned an invalid session.");
+    state.proxySessionId = result.sessionId;
     state.proxyReady = false;
     const frame = $("#page-frame");
     const shellUrl = `${state.proxyOrigin}/proxy-shell.html`;
@@ -246,23 +247,24 @@ window.addEventListener("message", (event) => {
   const frame = $("#page-frame");
   if (event.source !== frame.contentWindow || event.origin !== state.proxyOrigin || event.data?.source !== "nightjar-proxy") return;
   if (event.data.type === "nightjar:ready") {
-    if (!state.proxyGrant) {
+    if (!state.proxySessionId) {
       void api("/api/browser/grant", { method: "POST", body: {} }).then((result) => {
         if (!/^https?:\/\/[^/]+$/.test(result.proxyOrigin) || result.proxyOrigin !== state.proxyOrigin) {
           throw new Error("The private browsing engine returned an invalid origin.");
         }
-        state.proxyGrant = result.grant;
-        postProxy({ type: "nightjar:init", grant: state.proxyGrant, appOrigin: location.origin });
+        if (!/^[a-f0-9]{32}$/i.test(result.sessionId)) throw new Error("The Rammerhead engine returned an invalid session.");
+        state.proxySessionId = result.sessionId;
+        postProxy({ type: "nightjar:init", sessionId: state.proxySessionId, appOrigin: location.origin });
       }).catch((error) => {
         toast(error.message);
         setStatus("Private browsing engine unavailable");
       });
       return;
     }
-    postProxy({ type: "nightjar:init", grant: state.proxyGrant, appOrigin: location.origin });
+    postProxy({ type: "nightjar:init", sessionId: state.proxySessionId, appOrigin: location.origin });
   } else if (event.data.type === "nightjar:initialized") {
     state.proxyReady = true;
-    state.proxyGrant = "";
+    state.proxySessionId = "";
     const tab = activeTab();
     if (tab?.url) {
       postProxy({ type: "nightjar:select", tabId: tab.id, url: tab.url });
@@ -1009,7 +1011,7 @@ function openHelp() {
     <section class="help-card"><span class="help-card-kicker">QUICK START</span><h3>Your workspace, at a glance</h3><p>Type a web address or search in the top bar. Use <strong>+</strong> to open a tab, the bookmark icon to save a page, and the toolbar to find your history, local assistant, and settings.</p><p>Right-click the workspace or a tab for handy actions. Your tabs are saved in this browser on this device; bookmarks, history, and preferences are linked to your account.</p></section>
     <section class="help-card"><span class="help-card-kicker">MAKE IT YOURS</span><h3>Appearance and comfort</h3><p>Choose <strong>dark</strong>, <strong>light</strong>, or <strong>system</strong> appearance from the moon/sun button or Settings. Set an accent color, interface density, homepage, and search provider in Settings.</p><p>The animated cursor automatically gives way to your native cursor for reduced-motion preferences, touch input, and text entry.</p></section>
     <section class="help-card help-shortcuts"><span class="help-card-kicker">KEYBOARD SHORTCUTS</span><h3>Move around faster</h3><div class="help-shortcut-list">${shortcuts.map(([label, keys]) => `<div class="help-shortcut"><span>${escapeHtml(label)}</span><kbd>${escapeHtml(keys)}</kbd></div>`).join("")}</div></section>
-    <section class="help-card"><span class="help-card-kicker">PRIVACY & LIMITS</span><h3>What this browser can do</h3><p>Websites open through Nightjar's separate-origin Scramjet browsing engine. Navigation and page links run in its managed browsing surface. Some sites may still be incompatible; use <strong>Open in a regular tab</strong> when needed.</p><p>Downloads belong to the host browser. This web app does not control your device or regular browser. Desktop sharing or input requires a separately installed companion and local approval; an owner password alone cannot activate it.</p></section>
+    <section class="help-card"><span class="help-card-kicker">PRIVACY & LIMITS</span><h3>What this browser can do</h3><p>Websites open through Nightjar's separate-origin Rammerhead browsing engine. Destinations are limited to public HTTP(S) sites on ports 80 and 443. Some sites may still be incompatible; use <strong>Open in a regular tab</strong> when needed.</p><p>Downloads belong to the host browser. This web app does not control your device or regular browser. Desktop sharing or input requires a separately installed companion and local approval; an owner password alone cannot activate it.</p></section>
     <section class="help-card"><span class="help-card-kicker">LOCAL AI</span><h3>Ask the on-device assistant</h3><p>The assistant uses your local Ollama model and can be opened from the toolbar. Its chat is not saved, and it cannot read your open pages, files, or credentials. If unavailable, check Ollama and the model status in Settings or ask the workspace owner.</p></section>
     <section class="help-card"><span class="help-card-kicker">GAME LOUNGE</span><h3>Pick a game and play</h3><p>Open the toolbar's Game lounge to explore GN Math in a fresh Nightjar tab or play the built-in Quick Math sprint. The sprint's best score stays in this browser profile.</p></section>
     <section class="help-card help-contact"><span class="help-card-kicker">SUPPORT & IDEAS</span><h3>Help us make Nightjar better</h3><p>Send a private support request or feature suggestion to the owner. It is stored in this workspace for owner review and is not sent to an external service.</p>${canSendFeedback ? '<div class="fallback-actions"><button id="help-support" class="secondary-button" type="button">Contact support</button><button id="help-suggest" class="primary-button" type="button">Share an idea</button></div>' : '<p class="muted">Support requests are not enabled for this account. Ask the owner for access.</p>'}</section>
@@ -1268,7 +1270,7 @@ async function signOut(callServer = true) {
   if (clear && state.account) localStorage.removeItem(getStorageKey("tabs"));
   if (state.proxyReady) postProxy({ type: "nightjar:shutdown" });
   state.proxyReady = false;
-  state.proxyGrant = "";
+  state.proxySessionId = "";
   state.proxyOrigin = "";
   $("#page-frame").src = "about:blank";
   closeDialog();

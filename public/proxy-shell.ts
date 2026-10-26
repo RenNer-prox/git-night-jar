@@ -1,9 +1,7 @@
-import { BareMuxConnection } from "@mercuryworkshop/bare-mux";
-import type { ScramjetController, ScramjetFrame } from "@mercuryworkshop/scramjet";
+export {};
 
 type ParentCommand =
-  | { type: "nightjar:init"; grant: string; appOrigin: string }
-  | { type: "nightjar:renew"; grant: string }
+  | { type: "nightjar:init"; sessionId: string; appOrigin: string }
   | { type: "nightjar:select"; tabId: string; url: string }
   | { type: "nightjar:navigate"; tabId: string; url: string }
   | { type: "nightjar:back"; tabId: string }
@@ -14,7 +12,7 @@ type ParentCommand =
   | { type: "nightjar:shutdown" };
 
 type FrameState = {
-  frame: ScramjetFrame;
+  frame: HTMLIFrameElement;
   url: string;
 };
 
@@ -22,8 +20,7 @@ const surface = document.querySelector<HTMLElement>("#browsing-surface");
 const status = document.querySelector<HTMLElement>("#engine-status");
 const frames = new Map<string, FrameState>();
 let appOrigin = "";
-let controller: ScramjetController | null = null;
-let connection: BareMuxConnection | null = null;
+let sessionId = "";
 let initialized = false;
 
 function send(message: Record<string, string>): void {
@@ -39,110 +36,84 @@ function webAddress(value: string): string | null {
   }
 }
 
-function titleFor(frame: ScramjetFrame, fallback: string): string {
+function titleFor(frame: HTMLIFrameElement, fallback: string): string {
   try {
-    return frame.frame.contentDocument?.title.trim().slice(0, 120) || fallback;
+    return frame.contentDocument?.title.trim().slice(0, 120) || fallback;
   } catch {
     return fallback;
   }
 }
 
-function reportUrl(tabId: string, value: string, frame: ScramjetFrame): void {
-  const url = webAddress(value);
-  if (!url) return;
-  const state = frames.get(tabId);
-  if (state) state.url = url;
-  send({ type: "nightjar:url", tabId, url, title: titleFor(frame, new URL(url).hostname) });
+function frameAddress(frame: HTMLIFrameElement, fallback: string): string {
+  try {
+    const url = new URL(frame.contentWindow?.location.href ?? frame.src);
+    const prefix = `/${sessionId}/`;
+    if (!url.pathname.startsWith(prefix)) return fallback;
+    const destination = `${url.pathname.slice(prefix.length)}${url.search}${url.hash}`;
+    return webAddress(destination) ?? fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function reportUrl(tabId: string, frameState: FrameState): void {
+  const url = frameAddress(frameState.frame, frameState.url);
+  frameState.url = url;
+  send({ type: "nightjar:url", tabId, url, title: titleFor(frameState.frame, new URL(url).hostname) });
 }
 
 function createTabFrame(tabId: string): FrameState {
-  if (!controller || !surface) throw new Error("The Scramjet controller is not ready.");
-  const frame = controller.createFrame();
-  frame.frame.className = "scramjet-frame";
-  frame.frame.title = "Web page";
-  frame.frame.hidden = true;
-  frame.frame.setAttribute("allow", "camera 'none'; microphone 'none'; geolocation 'none'; display-capture 'none'; clipboard-read 'none'; clipboard-write 'none'");
+  if (!surface || !sessionId) throw new Error("The Rammerhead browsing engine is not ready.");
+  const frame = document.createElement("iframe");
+  frame.className = "rammerhead-frame";
+  frame.title = "Web page";
+  frame.hidden = true;
+  frame.setAttribute("allow", "camera 'none'; microphone 'none'; geolocation 'none'; display-capture 'none'; clipboard-read 'none'; clipboard-write 'none'");
   const frameState = { frame, url: "" };
-  frame.addEventListener("navigate", (event) => reportUrl(tabId, event.url, frame));
-  frame.addEventListener("urlchange", (event) => reportUrl(tabId, event.url, frame));
-  frame.frame.addEventListener("load", () => {
-    const current = frames.get(tabId);
-    if (!current) return;
-    send({ type: "nightjar:loaded", tabId, url: current.url, title: titleFor(frame, current.url ? new URL(current.url).hostname : "Web page") });
+  frame.addEventListener("load", () => {
+    if (!frames.has(tabId)) return;
+    reportUrl(tabId, frameState);
+    send({
+      type: "nightjar:loaded",
+      tabId,
+      url: frameState.url,
+      title: titleFor(frame, frameState.url ? new URL(frameState.url).hostname : "Web page"),
+    });
   });
   frames.set(tabId, frameState);
-  surface.append(frame.frame);
+  surface.append(frame);
   return frameState;
 }
 
-async function initialize(grant: string): Promise<void> {
-  if (initialized) {
-    await connection?.setTransport("/epoxy/index.mjs", [{ wisp: wispAddress(grant) }]);
-    send({ type: "nightjar:initialized" });
-    return;
+function proxiedUrl(url: string): string {
+  const address = webAddress(url);
+  if (!address || !sessionId) throw new Error("Nightjar sent an invalid web address.");
+  return `${location.origin}/${sessionId}/${address}`;
+}
+
+function initialize(command: Extract<ParentCommand, { type: "nightjar:init" }>, origin: string): void {
+  if (!/^https?:\/\/[^/]+$/.test(command.appOrigin) || command.appOrigin !== origin) {
+    throw new Error("Nightjar sent an invalid application origin.");
   }
-  if (!navigator.serviceWorker) throw new Error("This browser does not support the service worker required by Scramjet.");
-
-  const registration = await navigator.serviceWorker.register("/sw.js", { scope: "/" });
-  await navigator.serviceWorker.ready;
-  if (!navigator.serviceWorker.controller) {
-    await Promise.race([
-      new Promise<void>((resolve) => navigator.serviceWorker.addEventListener("controllerchange", () => resolve(), { once: true })),
-      new Promise<void>((_, reject) => setTimeout(() => reject(new Error("The Scramjet service worker did not take control. Reload the workspace and try again.")), 8000)),
-    ]);
-  }
-  if (!registration.active || !navigator.serviceWorker.controller) throw new Error("The Scramjet service worker is not active.");
-
-  const { ScramjetController: Controller } = $scramjetLoadController();
-  controller = new Controller({
-    prefix: "/scramjet/",
-    files: {
-      wasm: "/scram/scramjet.wasm.wasm",
-      all: "/scram/scramjet.all.js",
-      sync: "/scram/scramjet.sync.js",
-    },
-  });
-  await controller.init();
-
-  connection = new BareMuxConnection("/baremux/worker.js");
-  await connection.setTransport("/epoxy/index.mjs", [{ wisp: wispAddress(grant) }]);
+  if (!/^[a-f0-9]{32}$/i.test(command.sessionId)) throw new Error("Nightjar sent an invalid Rammerhead session.");
+  appOrigin = command.appOrigin;
+  sessionId = command.sessionId;
   initialized = true;
   if (status) status.textContent = "";
   send({ type: "nightjar:initialized" });
 }
 
-function wispAddress(grant: string): string {
-  const protocol = location.protocol === "https:" ? "wss:" : "ws:";
-  return `${protocol}//${location.host}/wisp/?grant=${encodeURIComponent(grant)}/`;
-}
-
-function handleCommand(command: ParentCommand): void {
+function handleCommand(command: ParentCommand, origin: string): void {
   if (command.type === "nightjar:init") {
-    if (!/^[a-f0-9-]{36}$/i.test(command.appOrigin) && !/^https?:\/\/[^/]+$/.test(command.appOrigin)) {
-      throw new Error("Nightjar sent an invalid application origin.");
-    }
-    appOrigin = command.appOrigin;
-    void initialize(command.grant).catch((error: unknown) => {
-      const message = error instanceof Error ? error.message : "The local browsing engine could not start.";
-      if (status) status.textContent = message;
-      send({ type: "nightjar:error", message });
-    });
+    initialize(command, origin);
     return;
   }
-  if (!initialized) throw new Error("The Scramjet browsing engine is not ready yet.");
-  if (command.type === "nightjar:renew") {
-    void initialize(command.grant).catch((error: unknown) => {
-      const message = error instanceof Error ? error.message : "The local browsing session could not renew.";
-      send({ type: "nightjar:error", message });
-    });
-    return;
-  }
+  if (!initialized || origin !== appOrigin) return;
   if (command.type === "nightjar:shutdown") {
-    for (const frame of frames.values()) frame.frame.frame.remove();
+    for (const frame of frames.values()) frame.frame.remove();
     frames.clear();
     initialized = false;
-    controller = null;
-    connection = null;
+    sessionId = "";
     return;
   }
   if (!("tabId" in command)) return;
@@ -150,14 +121,14 @@ function handleCommand(command: ParentCommand): void {
   if (!current && ["nightjar:select", "nightjar:navigate"].includes(command.type)) current = createTabFrame(command.tabId);
   if (!current) return;
 
-  for (const [id, entry] of frames) entry.frame.frame.hidden = id !== command.tabId;
+  for (const [id, entry] of frames) entry.frame.hidden = id !== command.tabId;
   switch (command.type) {
     case "nightjar:select": {
       const url = webAddress(command.url);
       if (!url) return;
       if (current.url !== url) {
         current.url = url;
-        current.frame.go(url);
+        current.frame.src = proxiedUrl(url);
       }
       break;
     }
@@ -165,23 +136,23 @@ function handleCommand(command: ParentCommand): void {
       const url = webAddress(command.url);
       if (!url) return;
       current.url = url;
-      current.frame.go(url);
+      current.frame.src = proxiedUrl(url);
       break;
     }
     case "nightjar:back":
-      current.frame.back();
+      current.frame.contentWindow?.history.back();
       break;
     case "nightjar:forward":
-      current.frame.forward();
+      current.frame.contentWindow?.history.forward();
       break;
     case "nightjar:reload":
-      current.frame.reload();
+      current.frame.contentWindow?.location.reload();
       break;
     case "nightjar:stop":
-      current.frame.frame.contentWindow?.stop();
+      current.frame.contentWindow?.stop();
       break;
     case "nightjar:close":
-      current.frame.frame.remove();
+      current.frame.remove();
       frames.delete(command.tabId);
       break;
   }
@@ -189,11 +160,10 @@ function handleCommand(command: ParentCommand): void {
 
 window.addEventListener("message", (event: MessageEvent<ParentCommand>) => {
   if (event.source !== window.parent || typeof event.data !== "object" || event.data === null) return;
-  if (event.data.type !== "nightjar:init" && event.origin !== appOrigin) return;
   try {
-    handleCommand(event.data);
+    handleCommand(event.data, event.origin);
   } catch (error) {
-    const message = error instanceof Error ? error.message : "The browsing request could not be completed.";
+    const message = error instanceof Error ? error.message : "The Rammerhead request could not be completed.";
     send({ type: "nightjar:error", message });
   }
 });
@@ -202,7 +172,7 @@ if (window.top === window.self) {
   if (status) {
     status.replaceChildren();
     const message = document.createElement("strong");
-    message.textContent = "This is Nightjar’s internal browsing engine.";
+    message.textContent = "This is Nightjar’s internal Rammerhead engine.";
     const detail = document.createElement("span");
     detail.textContent = "It only runs inside the Nightjar browser workspace.";
     const link = document.createElement("a");

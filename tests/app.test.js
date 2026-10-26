@@ -4,10 +4,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHmac } from "node:crypto";
-import { connect } from "node:net";
-import WebSocket from "ws";
-import { client as wisp } from "@mercuryworkshop/wisp-js/client";
-import { createApp, runAdminCommand } from "../server.js";
+import { createApp, isPublicAddress, restrictedLookup, runAdminCommand } from "../server.js";
 
 const password = "a-strong-owner-password-for-tests";
 let app;
@@ -61,70 +58,6 @@ function cookieFrom(response, name) {
   const match = setCookie.match(new RegExp(`(?:^|,\\s*)${name}=([^;]*)`));
   assert.ok(match, `expected ${name} cookie`);
   return `${name}=${match[1]}`;
-}
-
-async function websocketUpgrade(port, path, origin) {
-  return new Promise((resolve) => {
-    const socket = connect(port, "127.0.0.1");
-    let response = "";
-    const finish = () => {
-      clearTimeout(timer);
-      socket.destroy();
-      resolve(response);
-    };
-    const timer = setTimeout(finish, 1000);
-    socket.on("connect", () => {
-      socket.write(`GET ${path} HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nOrigin: ${origin}\r\n\r\n`);
-    });
-    socket.on("data", (chunk) => { response += chunk.toString(); finish(); });
-    socket.on("close", finish);
-    socket.on("error", finish);
-  });
-}
-
-async function connectWisp(url, origin) {
-  class OriginWispConnection extends wisp.ClientConnection {
-    connect_ws() {
-      const subprotocol = this.wisp_version === 2 ? "wisp-v2" : undefined;
-      this.ws = new WebSocket(this.wisp_url, subprotocol, { headers: { Origin: origin } });
-      this.ws.binaryType = "arraybuffer";
-      this.connecting = true;
-      this.ws.onmessage = (event) => {
-        this.on_ws_msg(event);
-        if (this.connected && this.connecting) {
-          this.connecting = false;
-          this.onopen();
-        }
-      };
-      this.ws.onclose = () => {
-        this.cleanup();
-        this.onclose();
-      };
-      this.ws.onerror = () => {
-        this.cleanup();
-        this.onerror();
-      };
-    }
-  }
-
-  const connection = new OriginWispConnection(url);
-  try {
-    await new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => reject(new Error("Wisp handshake timed out.")), 5000);
-      connection.onopen = () => {
-        clearTimeout(timeout);
-        resolve();
-      };
-      connection.onerror = () => {
-        clearTimeout(timeout);
-        reject(new Error("Wisp handshake failed."));
-      };
-    });
-    return connection;
-  } catch (error) {
-    connection.close();
-    throw error;
-  }
 }
 
 async function issueToken({ label, usageLimit = "", accountId = "", rank, features = ["bookmarks", "history", "settings", "assistant"], permissions = ["browse", "bookmarks", "history", "settings", "assistant"] } = {}) {
@@ -214,18 +147,17 @@ test("serves the browser and keeps administrator routes isolated", async () => {
   assert.equal(directProxyShell.status, 200);
   const directProxyHtml = await directProxyShell.text();
   assert.match(directProxyHtml, /browsing engine/);
-  assert.match(directProxyHtml, /scramjet\.all\.js/);
-  assert.doesNotMatch(directProxyHtml, /scramjet\.bundle\.js/);
+  assert.match(directProxyHtml, /Rammerhead/);
+  assert.doesNotMatch(directProxyHtml, /scramjet|baremux|epoxy/i);
   const proxyClient = await fetch(`${proxyOrigin}/dist/proxy-shell.js`);
   assert.equal(proxyClient.status, 200);
   const proxyClientScript = await proxyClient.text();
   assert.match(proxyClientScript, /standalone-shell/);
   assert.match(proxyClientScript, /Open Nightjar/);
-  const scramjet = await fetch(`${proxyOrigin}/scram/scramjet.all.js`);
-  assert.equal(scramjet.status, 200);
-  assert.match(scramjet.headers.get("content-type"), /javascript/);
+  const unauthorizedEngineRequest = await fetch(`${proxyOrigin}/rammerhead.js`);
+  assert.equal(unauthorizedEngineRequest.status, 403);
   const forbiddenProxyAsset = await fetch(`${proxyOrigin}/../server.js`);
-  assert.equal(forbiddenProxyAsset.status, 404);
+  assert.equal(forbiddenProxyAsset.status, 403);
   const forbidden = await request("/api/admin/summary");
   assert.equal(forbidden.response.status, 401);
 });
@@ -274,15 +206,22 @@ test("hashes invitation tokens, enforces permissions, and persists bookmarks, hi
   });
   assert.equal(grant.response.status, 200, JSON.stringify(grant.data));
   assert.equal(grant.data.proxyOrigin, `http://127.0.0.1:${app.proxyServer.address().port}`);
+  assert.match(grant.data.sessionId, /^[a-f0-9]{32}$/i);
   const proxyPort = app.proxyServer.address().port;
-  const deniedWisp = await websocketUpgrade(proxyPort, "/wisp/?grant=not-a-session-grant", grant.data.proxyOrigin);
-  assert.doesNotMatch(deniedWisp, /101 Switching Protocols/);
-  const validWisp = await connectWisp(
-    `ws://127.0.0.1:${proxyPort}/wisp/?grant=${encodeURIComponent(grant.data.grant)}/`,
-    grant.data.proxyOrigin,
-  );
-  assert.equal(validWisp.connected, true);
-  validWisp.close();
+  const proxiedPage = `${grant.data.proxyOrigin}/${grant.data.sessionId}/https://example.org/`;
+  const blockedLoopback = await fetch(`${grant.data.proxyOrigin}/${grant.data.sessionId}/http://127.0.0.1:${proxyPort}/`);
+  assert.equal(blockedLoopback.status, 403);
+  const blockedPrivatePort = await fetch(`${grant.data.proxyOrigin}/${grant.data.sessionId}/http://example.org:8080/`);
+  assert.equal(blockedPrivatePort.status, 403);
+  const rammerheadScript = await fetch(`${grant.data.proxyOrigin}/rammerhead.js`, {
+    headers: { Referer: proxiedPage },
+  });
+  assert.equal(rammerheadScript.status, 200);
+  assert.match(rammerheadScript.headers.get("content-type"), /javascript/);
+  const blockedSessionCreation = await fetch(`${grant.data.proxyOrigin}/newsession`, {
+    headers: { Referer: proxiedPage },
+  });
+  assert.equal(blockedSessionCreation.status, 403);
 
   const adminOwnSession = await request("/api/admin/me", { cookie: adminCookie });
   assert.equal(adminOwnSession.response.status, 200, "separate admin and user cookies remain independent");
@@ -294,6 +233,7 @@ test("hashes invitation tokens, enforces permissions, and persists bookmarks, hi
   const noCsrf = await request("/api/bookmarks", {
     method: "POST", cookie: userCookie, body: { url: "https://example.org/", title: "Example" },
   });
+
   assert.equal(noCsrf.response.status, 403);
 
   const bookmark = await request("/api/bookmarks", {
@@ -381,6 +321,22 @@ test("hashes invitation tokens, enforces permissions, and persists bookmarks, hi
   assert.equal((await request("/api/session", { cookie: userCookie })).response.status, 401);
   const reuse = await request("/api/auth/login", { method: "POST", body: { token: issued.token } });
   assert.equal(reuse.response.status, 401);
+});
+
+test("blocks Rammerhead outbound connections to private and reserved addresses", async () => {
+  for (const address of [
+    "0.0.0.0", "10.0.0.1", "127.0.0.1", "169.254.169.254", "192.168.1.1",
+    "::", "::1", "fc00::1", "fe80::1", "2001:db8::1", "3fff::1",
+    "::ffff:127.0.0.1", "::ffff:192.0.2.1",
+  ]) {
+    assert.equal(isPublicAddress(address), false, `${address} must not be proxyable`);
+  }
+  assert.equal(isPublicAddress("1.1.1.1"), true);
+  assert.equal(isPublicAddress("2001:4860:4860::8888"), true);
+  await new Promise((resolve, reject) => restrictedLookup("127.0.0.1", { all: true }, (error) => {
+    if (error?.code === "EACCES") resolve();
+    else reject(error ?? new Error("The loopback lookup was not rejected."));
+  }));
 });
 
 test("a second active account sign-in revokes authorization and permits a replacement invitation", async () => {
