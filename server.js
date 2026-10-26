@@ -41,8 +41,8 @@ const DEFAULT_RANKS = [
   { id: "basic", label: "Basic", permissions: ["browse", "assistant"], features: ["assistant"] },
   { id: "basic-plus", label: "Basic+", permissions: ["browse", "bookmarks", "history", "assistant"], features: ["bookmarks", "history", "assistant"] },
   { id: "ai", label: "AI", permissions: ["browse", "bookmarks", "history", "assistant"], features: ["bookmarks", "history", "assistant"] },
-  { id: "full-minus", label: "Full-", permissions: ["browse", "bookmarks", "history", "settings", "assistant", "games", "support"], features: ["bookmarks", "history", "settings", "assistant", "games", "support"] },
-  { id: "owner", label: "Owner", permissions: ["browse", "bookmarks", "history", "settings", "assistant", "games", "support"], features: ["bookmarks", "history", "settings", "assistant", "games", "support"] },
+  { id: "full-minus", label: "Full-", permissions: ["browse", "bookmarks", "history", "settings", "assistant"], features: ["bookmarks", "history", "settings", "assistant"] },
+  { id: "owner", label: "Owner", permissions: ["browse", "bookmarks", "history", "settings", "assistant"], features: ["bookmarks", "history", "settings", "assistant"] },
 ];
 const BUILT_IN_RANK_IDS = new Set(DEFAULT_RANKS.map(({ id }) => id));
 const DEFAULT_SETTINGS = {
@@ -552,6 +552,52 @@ function createDatabase(path) {
     for (const account of db.prepare("SELECT id FROM accounts").all()) createDefaultProjectAreas(db, account.id, createdAt);
     db.prepare("INSERT INTO schema_migrations(version, applied_at) VALUES (8, CURRENT_TIMESTAMP)").run();
   }
+  if (!db.prepare("SELECT version FROM schema_migrations WHERE version = 9").get()) {
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      const legacyRanks = [
+        ["standard", "basic-plus"],
+        ["without-ai", "basic-plus"],
+        ["with-ai", "ai"],
+        ["full", "full-minus"],
+        ["legacy-owner", "full-minus"],
+      ];
+      for (const [legacyId, replacementId] of legacyRanks) {
+        const replacement = DEFAULT_RANKS.find(({ id }) => id === replacementId);
+        db.prepare("UPDATE accounts SET rank = ?, permissions_json = ?, features_json = ? WHERE rank = ?")
+          .run(replacement.id, JSON.stringify(replacement.permissions), JSON.stringify(replacement.features), legacyId);
+        db.prepare("UPDATE tokens SET rank = ?, permissions_json = ? WHERE rank = ?")
+          .run(replacement.id, JSON.stringify(replacement.permissions), legacyId);
+        db.prepare("DELETE FROM ranks WHERE id = ?").run(legacyId);
+      }
+      const upsertRank = db.prepare(`INSERT INTO ranks(id, label, permissions_json, features_json, created_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET label = excluded.label,
+          permissions_json = excluded.permissions_json, features_json = excluded.features_json`);
+      for (const rank of DEFAULT_RANKS) {
+        const labelConflict = db.prepare("SELECT id FROM ranks WHERE label = ? AND id != ?").get(rank.label, rank.id);
+        if (labelConflict) {
+          let legacyLabel = `${rank.label} (legacy)`;
+          let suffix = 1;
+          while (db.prepare("SELECT id FROM ranks WHERE label = ?").get(legacyLabel)) {
+            legacyLabel = `${rank.label} (legacy ${suffix})`;
+            suffix += 1;
+          }
+          db.prepare("UPDATE ranks SET label = ? WHERE id = ?").run(legacyLabel, labelConflict.id);
+        }
+        upsertRank.run(rank.id, rank.label, JSON.stringify(rank.permissions), JSON.stringify(rank.features), new Date().toISOString());
+        db.prepare("UPDATE accounts SET permissions_json = ?, features_json = ? WHERE rank = ?")
+          .run(JSON.stringify(rank.permissions), JSON.stringify(rank.features), rank.id);
+        db.prepare("UPDATE tokens SET permissions_json = ? WHERE rank = ?")
+          .run(JSON.stringify(rank.permissions), rank.id);
+      }
+      db.prepare("INSERT INTO schema_migrations(version, applied_at) VALUES (9, CURRENT_TIMESTAMP)").run();
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
+  }
   return db;
 }
 
@@ -644,7 +690,8 @@ export async function runAdminCommand(args, options = {}) {
       return { type: "accounts", items };
     }
     if (resource === "ranks" && action === "list" && positional.length <= 2) {
-      const items = db.prepare("SELECT id, label, permissions_json, features_json, created_at FROM ranks ORDER BY label").all()
+      const items = db.prepare(`SELECT id, label, permissions_json, features_json, created_at FROM ranks
+        ORDER BY CASE id WHEN 'basic' THEN 0 WHEN 'basic-plus' THEN 1 WHEN 'ai' THEN 2 WHEN 'full-minus' THEN 3 WHEN 'owner' THEN 4 ELSE 5 END, label`).all()
         .map((row) => ({ ...row, permissions: safeJson(row.permissions_json, []), features: safeJson(row.features_json, []) }));
       return { type: "ranks", items };
     }
@@ -1365,7 +1412,8 @@ export async function createApp(options = {}) {
 
     if (method === "GET" && path === "/api/admin/ranks") {
       requireOwner(session);
-      const items = db.prepare("SELECT id, label, permissions_json, features_json, created_at FROM ranks ORDER BY label").all()
+      const items = db.prepare(`SELECT id, label, permissions_json, features_json, created_at FROM ranks
+        ORDER BY CASE id WHEN 'basic' THEN 0 WHEN 'basic-plus' THEN 1 WHEN 'ai' THEN 2 WHEN 'full-minus' THEN 3 WHEN 'owner' THEN 4 ELSE 5 END, label`).all()
         .map((row) => ({
           id: row.id,
           label: row.label,

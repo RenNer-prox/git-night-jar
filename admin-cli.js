@@ -9,6 +9,7 @@ Only the local owner can access the database.
 
   npm run manage -- accounts list
   npm run manage -- tokens list
+  npm run manage -- ranks list
   npm run manage -- tokens create --label "Guest laptop" [options]
   npm run manage -- tokens revoke <token-id>
 
@@ -22,8 +23,9 @@ Create options:
   --features <list|none>          bookmarks,history,settings,assistant,games,support
 
 Basic and Basic+ receive 20 lifetime local AI requests per token; AI, Full- and
-Owner receive unlimited local AI. Only the explicitly assigned Owner rank can
-access the owner console. Features require matching permissions. Invitations
+Owner receive unlimited local AI. Full- adds toolbar and title/icon customization.
+Only the explicitly assigned Owner rank can access the owner console. Features
+require matching permissions. Invitations
 are single-use; the raw token is printed once and must be shared privately.`);
 }
 
@@ -41,6 +43,9 @@ try {
     for (const item of result.items) {
       console.log(`${item.status.padEnd(8)} ${item.id}  ${item.account_label} / ${item.label}  ${item.usage_count}/${item.usage_limit ?? "∞"} uses  [${item.permissions.join(", ")}]`);
     }
+  } else if (result.type === "ranks") {
+    if (!result.items.length) console.log("No access ranks are configured.");
+    for (const item of result.items) console.log(`${item.id.padEnd(16)} ${item.label} [${item.permissions.join(", ")}] features=[${item.features.join(", ") || "none"}]`);
   } else if (result.type === "accounts") {
     if (!result.items.length) console.log("No accounts yet.");
     for (const item of result.items) {

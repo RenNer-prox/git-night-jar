@@ -4,6 +4,8 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHmac } from "node:crypto";
+import { spawnSync } from "node:child_process";
+import { DatabaseSync } from "node:sqlite";
 import { createApp, isPublicAddress, restrictedLookup, runAdminCommand } from "../server.js";
 
 const password = "a-strong-owner-password-for-tests";
@@ -73,6 +75,18 @@ async function issueToken({ label, usageLimit = "", accountId = "", rank, friend
       permissions,
       features,
     },
+  });
+  assert.equal(response.status, 201, JSON.stringify(data));
+  return data;
+}
+
+async function issuePresetToken(rank) {
+  const label = `Preset ${rank} ${Date.now()}`;
+  const { response, data } = await request("/api/admin/tokens", {
+    method: "POST",
+    cookie: adminCookie,
+    csrf: adminCsrf,
+    body: { label, accountLabel: label, rank },
   });
   assert.equal(response.status, 201, JSON.stringify(data));
   return data;
@@ -422,12 +436,31 @@ test("owner CLI creates one-time invitations and revokes their active session", 
 test("provides the five built-in ranks and protects built-in presets", async () => {
   const ranks = await runAdminCommand(["ranks"], { databasePath: join(tempDirectory, "nightjar.sqlite") });
   const byId = new Map(ranks.items.map((rank) => [rank.id, rank]));
+  assert.deepEqual(ranks.items.map(({ id }) => id), ["basic", "basic-plus", "ai", "full-minus", "owner"]);
+  const cli = spawnSync(process.execPath, ["admin-cli.js", "ranks", "list"], {
+    cwd: process.cwd(),
+    encoding: "utf8",
+    env: { ...process.env, DATABASE_PATH: join(tempDirectory, "nightjar.sqlite") },
+  });
+  assert.equal(cli.status, 0, cli.stderr);
+  assert.deepEqual(cli.stdout.trim().split("\n"), [
+    "basic            Basic [browse, assistant] features=[assistant]",
+    "basic-plus       Basic+ [browse, bookmarks, history, assistant] features=[bookmarks, history, assistant]",
+    "ai               AI [browse, bookmarks, history, assistant] features=[bookmarks, history, assistant]",
+    "full-minus       Full- [browse, bookmarks, history, settings, assistant] features=[bookmarks, history, settings, assistant]",
+    "owner            Owner [browse, bookmarks, history, settings, assistant] features=[bookmarks, history, settings, assistant]",
+  ]);
   assert.deepEqual(["basic", "basic-plus", "ai", "full-minus", "owner"].map((id) => byId.get(id)?.label), ["Basic", "Basic+", "AI", "Full-", "Owner"]);
+  assert.deepEqual(byId.get("basic").permissions, ["browse", "assistant"]);
   assert.deepEqual(byId.get("basic").features, ["assistant"]);
+  assert.deepEqual(byId.get("basic-plus").permissions, ["browse", "bookmarks", "history", "assistant"]);
   assert.deepEqual(byId.get("basic-plus").features, ["bookmarks", "history", "assistant"]);
+  assert.deepEqual(byId.get("ai").permissions, ["browse", "bookmarks", "history", "assistant"]);
   assert.deepEqual(byId.get("ai").features, ["bookmarks", "history", "assistant"]);
   assert.ok(!byId.get("ai").features.includes("settings"));
-  assert.ok(byId.get("full-minus").features.includes("settings"));
+  assert.deepEqual(byId.get("full-minus").permissions, ["browse", "bookmarks", "history", "settings", "assistant"]);
+  assert.deepEqual(byId.get("full-minus").features, ["bookmarks", "history", "settings", "assistant"]);
+  assert.deepEqual(byId.get("owner").permissions, byId.get("full-minus").permissions);
   assert.deepEqual(byId.get("owner").features, byId.get("full-minus").features);
   const basicToken = await runAdminCommand(["token", "make", "Basic invite", "basic"], {
     databasePath: join(tempDirectory, "nightjar.sqlite"),
@@ -471,6 +504,70 @@ test("provides the five built-in ranks and protects built-in presets", async () 
   assert.deepEqual(preserved.features, customToken.features);
   assert.equal((await runAdminCommand(["tokens"], { databasePath: join(tempDirectory, "nightjar.sqlite") })).type, "tokens");
   assert.equal((await runAdminCommand(["accounts"], { databasePath: join(tempDirectory, "nightjar.sqlite") })).type, "accounts");
+});
+
+test("upgrades stale built-in ranks and account grants from existing databases", async () => {
+  const path = await mkdtemp(join(tmpdir(), "nightjar-rank-migration-"));
+  let migrationApp;
+  try {
+    const databasePath = join(path, "nightjar.sqlite");
+    migrationApp = await createApp({ databasePath, adminPassword: password, aiAutostart: false, ollamaFetch });
+    migrationApp.stop();
+    migrationApp.db.close();
+    migrationApp = null;
+
+    const legacyDb = new DatabaseSync(databasePath);
+    legacyDb.exec("DELETE FROM schema_migrations WHERE version = 9; DELETE FROM ranks;");
+    const staleRanks = [
+      ["basic", "Basic", ["browse", "support"], ["support"]],
+      ["standard", "Standard", ["browse", "bookmarks", "history"], ["bookmarks", "history"]],
+      ["without-ai", "Without AI", ["browse", "bookmarks", "history"], ["bookmarks", "history"]],
+      ["with-ai", "With AI", ["browse", "assistant"], ["assistant"]],
+      ["full", "Full", ["browse", "games", "support"], ["games", "support"]],
+      ["full-minus", "Full-", ["browse"], []],
+      ["owner", "Owner", ["browse"], []],
+      ["legacy-owner", "Legacy owner preset", ["browse", "assistant"], ["assistant"]],
+    ];
+    const insertRank = legacyDb.prepare("INSERT INTO ranks(id, label, permissions_json, features_json, created_at) VALUES (?, ?, ?, ?, ?)");
+    const insertAccount = legacyDb.prepare(`INSERT INTO accounts(id, label, settings_json, permissions_json, features_json, rank, created_at)
+      VALUES (?, ?, '{}', ?, ?, ?, ?)`);
+    const insertToken = legacyDb.prepare(`INSERT INTO tokens(id, account_id, token_hash, label, permissions_json, rank, usage_limit, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, 1, ?)`);
+    const now = new Date().toISOString();
+    staleRanks.forEach(([id, label, permissions, features], index) => {
+      insertRank.run(id, label, JSON.stringify(permissions), JSON.stringify(features), now);
+      if (["standard", "without-ai", "with-ai", "full", "legacy-owner"].includes(id)) {
+        const accountId = `legacy-account-${index}`;
+        const tokenId = `legacy-token-${index}`;
+        insertAccount.run(accountId, label, JSON.stringify(permissions), JSON.stringify(features), id, now);
+        insertToken.run(tokenId, accountId, `hash-${index}`, label, JSON.stringify(permissions), id, now);
+      }
+    });
+    legacyDb.close();
+
+    migrationApp = await createApp({ databasePath, adminPassword: password, aiAutostart: false, ollamaFetch });
+    assert.ok(migrationApp.db.prepare("SELECT version FROM schema_migrations WHERE version = 9").get());
+    const ranks = await runAdminCommand(["ranks"], { databasePath });
+    assert.deepEqual(ranks.items.map(({ id }) => id), ["basic", "basic-plus", "ai", "full-minus", "owner"]);
+    assert.deepEqual(ranks.items[0].permissions, ["browse", "assistant"]);
+    assert.deepEqual(ranks.items[3].features, ["bookmarks", "history", "settings", "assistant"]);
+    const migrated = migrationApp.db.prepare(`SELECT a.rank, a.permissions_json, a.features_json, t.rank AS token_rank, t.permissions_json AS token_permissions
+      FROM accounts a JOIN tokens t ON t.account_id = a.id ORDER BY a.id`).all();
+    assert.deepEqual(migrated.map(({ rank, token_rank }) => [rank, token_rank]), [
+      ["basic-plus", "basic-plus"],
+      ["basic-plus", "basic-plus"],
+      ["ai", "ai"],
+      ["full-minus", "full-minus"],
+      ["full-minus", "full-minus"],
+    ]);
+    assert.deepEqual(JSON.parse(migrated[0].permissions_json), ["browse", "bookmarks", "history", "assistant"]);
+    assert.deepEqual(JSON.parse(migrated[0].features_json), ["bookmarks", "history", "assistant"]);
+    assert.deepEqual(JSON.parse(migrated[2].token_permissions), ["browse", "bookmarks", "history", "assistant"]);
+  } finally {
+    migrationApp?.stop();
+    migrationApp?.db.close();
+    await rm(path, { recursive: true, force: true });
+  }
 });
 
 test("owner can manage ranks and review private support requests", async () => {
@@ -660,6 +757,96 @@ test("Basic AI quota is token-scoped and Full- customization is permission-gated
   assert.equal(saved.data.settings.customTitle, "Alex Workspace");
   assert.equal(saved.data.settings.customIcon, "🌙");
   assert.deepEqual(saved.data.settings.toolbarOrder, customOrder);
+});
+
+test("built-in rank capabilities and AI limits are enforced by the server", async () => {
+  const expected = {
+    basic: {
+      permissions: ["browse", "assistant"],
+      features: ["assistant"],
+      aiLimit: 20,
+      settings: false,
+    },
+    "basic-plus": {
+      permissions: ["browse", "bookmarks", "history", "assistant"],
+      features: ["bookmarks", "history", "assistant"],
+      aiLimit: 20,
+      settings: false,
+    },
+    ai: {
+      permissions: ["browse", "bookmarks", "history", "assistant"],
+      features: ["bookmarks", "history", "assistant"],
+      aiLimit: null,
+      settings: false,
+    },
+    "full-minus": {
+      permissions: ["browse", "bookmarks", "history", "settings", "assistant"],
+      features: ["bookmarks", "history", "settings", "assistant"],
+      aiLimit: null,
+      settings: true,
+    },
+    owner: {
+      permissions: ["browse", "bookmarks", "history", "settings", "assistant"],
+      features: ["bookmarks", "history", "settings", "assistant"],
+      aiLimit: null,
+      settings: true,
+    },
+  };
+  for (const [rank, capabilities] of Object.entries(expected)) {
+    const invitation = await issuePresetToken(rank);
+    assert.deepEqual(invitation.item.permissions, capabilities.permissions);
+    assert.equal(invitation.item.aiUsageLimit, capabilities.aiLimit);
+    const login = await request("/api/auth/login", { method: "POST", body: { token: invitation.token } });
+    assert.equal(login.response.status, 200, JSON.stringify(login.data));
+    const cookie = cookieFrom(login.response, "nj_session");
+    assert.equal(login.data.account.rank, rank);
+    assert.deepEqual(login.data.account.permissions, capabilities.permissions);
+    assert.deepEqual(login.data.account.features, capabilities.features);
+    assert.equal((await request("/api/browser/resolve?q=nightjar", { cookie })).response.status, 200);
+    assert.equal((await request("/api/bookmarks", { cookie })).response.status, capabilities.features.includes("bookmarks") ? 200 : 403);
+    assert.equal((await request("/api/history", { cookie })).response.status, capabilities.features.includes("history") ? 200 : 403);
+    assert.equal((await request("/api/settings", { cookie })).response.status, capabilities.settings ? 200 : 403);
+    assert.equal((await request("/api/admin/me", { cookie })).response.status, rank === "owner" ? 200 : 403);
+    const customOrder = ["admin-link", "help-open", "settings-open", "theme-toggle", "open-regular", "games-open", "assistant-open", "downloads-open", "history-open", "bookmarks-open"];
+    const settingsUpdate = await request("/api/settings", {
+      method: "PUT",
+      cookie,
+      csrf: login.data.csrf,
+      body: {
+        settings: {
+          ...login.data.account.settings,
+          customTitle: "Rank Workspace",
+          customIcon: "N",
+          toolbarOrder: customOrder,
+        },
+      },
+    });
+    assert.equal(settingsUpdate.response.status, capabilities.settings ? 200 : 403);
+    if (capabilities.settings) {
+      assert.equal(settingsUpdate.data.settings.customTitle, "Rank Workspace");
+      assert.equal(settingsUpdate.data.settings.customIcon, "N");
+      assert.deepEqual(settingsUpdate.data.settings.toolbarOrder, customOrder);
+    }
+
+    app.db.prepare("UPDATE tokens SET ai_usage_count = ? WHERE id = ?")
+      .run(capabilities.aiLimit === null ? 999 : capabilities.aiLimit, invitation.item.id);
+    const capability = await request("/api/capabilities", { cookie });
+    assert.equal(capability.data.ai.usage.limit, capabilities.aiLimit);
+    assert.equal(capability.data.ai.usage.used, capabilities.aiLimit ?? 999);
+    const chat = await request("/api/ai/chat", {
+      method: "POST",
+      cookie,
+      csrf: login.data.csrf,
+      body: { messages: [{ role: "user", content: `test ${rank}` }] },
+    });
+    if (capabilities.aiLimit === null) {
+      assert.equal(chat.response.status, 200, JSON.stringify(chat.data));
+      assert.equal(app.db.prepare("SELECT ai_usage_count FROM tokens WHERE id = ?").get(invitation.item.id).ai_usage_count, 1000);
+    } else {
+      assert.equal(chat.response.status, 429);
+      assert.equal(chat.data.code, "ai_quota_exhausted");
+    }
+  }
 });
 
 test("owner account and site controls are enforced server-side", async () => {
