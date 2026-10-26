@@ -17,12 +17,14 @@ Create options:
   --account-id <uuid>             Add an invitation to an existing account
   --uses <number|unlimited>       Successful sign-ins for this invitation
   --expires <date-or-timestamp>   Expiration, e.g. 2026-12-31
-  --permissions <list>            browse,bookmarks,history,settings,assistant
-  --features <list|none>          bookmarks,history,settings,assistant
+  --rank <rank-id>                basic,basic-plus,ai,full-minus,owner
+  --permissions <list>            browse,bookmarks,history,settings,assistant,games,support
+  --features <list|none>          bookmarks,history,settings,assistant,games,support
 
-Features require matching permissions. --uses limits this invitation token;
-it is not an aggregate limit across every invitation for an account. The raw
-token is printed only once when created. Copy it and share it privately.`);
+Basic and Basic+ receive 20 lifetime local AI requests per token; AI, Full- and
+Owner receive unlimited local AI. Only the explicitly assigned Owner rank can
+access the owner console. Features require matching permissions. Invitations
+are single-use; the raw token is printed once and must be shared privately.`);
 }
 
 try {

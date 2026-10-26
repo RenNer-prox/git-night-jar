@@ -60,7 +60,7 @@ function cookieFrom(response, name) {
   return `${name}=${match[1]}`;
 }
 
-async function issueToken({ label, usageLimit = "", accountId = "", rank, features = ["bookmarks", "history", "settings", "assistant"], permissions = ["browse", "bookmarks", "history", "settings", "assistant"] } = {}) {
+async function issueToken({ label, usageLimit = "", accountId = "", rank, friend = false, features = ["bookmarks", "history", "settings", "assistant"], permissions = ["browse", "bookmarks", "history", "settings", "assistant"] } = {}) {
   const { response, data } = await request("/api/admin/tokens", {
     method: "POST", cookie: adminCookie, csrf: adminCsrf,
     body: {
@@ -68,6 +68,7 @@ async function issueToken({ label, usageLimit = "", accountId = "", rank, featur
       accountLabel: label ?? "Test Account",
       accountId,
       rank,
+      friend,
       usageLimit,
       permissions,
       features,
@@ -86,6 +87,8 @@ before(async () => {
     adminPassword: password,
     aiAutostart: false,
     desktopSecret: "a".repeat(64),
+    dashboardOrigins: ["https://dashboard.example"],
+    userLoginLimit: 100,
     ollamaFetch,
   });
   await new Promise((resolve) => app.server.listen(0, "127.0.0.1", resolve));
@@ -124,6 +127,8 @@ test("serves the browser and keeps administrator routes isolated", async () => {
   assert.match(appScript, /function openHelp\(\)/);
   assert.match(appScript, /https:\/\/gn-math\.dev/);
   assert.match(appScript, /function openQuickMathGame\(\)/);
+  assert.match(appScript, /function openProjectAreaDialog/);
+  assert.match(appScript, /toolbarOrder/);
   const styles = await fetch(`${baseUrl}/styles.css`);
   assert.equal(styles.status, 200);
   assert.match(await styles.text(), /\.game-lounge/);
@@ -135,6 +140,8 @@ test("serves the browser and keeps administrator routes isolated", async () => {
   const adminHtml = await adminPage.text();
   assert.match(adminHtml, /Administrator sign-in/);
   assert.match(adminHtml, /Pair this owner session/);
+  assert.match(adminHtml, /data-panel="friends"/);
+  assert.match(adminHtml, /Add friend/);
   assert.match(adminHtml, /HttpOnly session cookie and CSRF protection/);
   assert.doesNotMatch(adminHtml, /desktop-pair-code|one-time code shown in companion terminal/);
   const proxyOrigin = `http://127.0.0.1:${app.proxyServer.address().port}`;
@@ -166,6 +173,8 @@ test("allows multiple independent owner sessions", async () => {
   const adminIndexes = app.db.prepare("PRAGMA index_list(sessions)").all();
   assert.ok(!adminIndexes.some((index) => index.name === "one_admin_session"));
   assert.ok(app.db.prepare("SELECT version FROM schema_migrations WHERE version = 6").get());
+  assert.ok(app.db.prepare("SELECT version FROM schema_migrations WHERE version = 7").get());
+  assert.ok(app.db.prepare("SELECT version FROM schema_migrations WHERE version = 8").get());
 
   const secondLogin = await request("/api/admin/login", { method: "POST", body: { password } });
   assert.equal(secondLogin.response.status, 200, JSON.stringify(secondLogin.data));
@@ -226,7 +235,11 @@ test("hashes invitation tokens, enforces permissions, and persists bookmarks, hi
   const adminOwnSession = await request("/api/admin/me", { cookie: adminCookie });
   assert.equal(adminOwnSession.response.status, 200, "separate admin and user cookies remain independent");
   const adminBlockedWithUserCookie = await request("/api/admin/summary", { cookie: userCookie });
-  assert.equal(adminBlockedWithUserCookie.response.status, 401);
+  assert.equal(adminBlockedWithUserCookie.response.status, 403);
+  const ownerApiBlockedWithUserCookie = await request("/api/owner/dashboard/tokens", {
+    cookie: userCookie, origin: "https://dashboard.example",
+  });
+  assert.equal(ownerApiBlockedWithUserCookie.response.status, 403);
   const userBlockedFromAdminRoute = await request("/api/session", { cookie: adminCookie });
   assert.equal(userBlockedFromAdminRoute.response.status, 401);
 
@@ -406,35 +419,39 @@ test("owner CLI creates one-time invitations and revokes their active session", 
   assert.equal(listed.items.find((item) => item.id === created.id).status, "revoked");
 });
 
-test("supports named ranks and concise single-use renewal commands", async () => {
+test("provides the five built-in ranks and protects built-in presets", async () => {
   const ranks = await runAdminCommand(["ranks"], { databasePath: join(tempDirectory, "nightjar.sqlite") });
-  const withAi = ranks.items.find((rank) => rank.id === "with-ai");
-  const withoutAi = ranks.items.find((rank) => rank.id === "without-ai");
-  assert.ok(withAi && withoutAi);
-  assert.ok(withAi.features.includes("assistant"));
-  assert.ok(withAi.permissions.includes("assistant"));
-  assert.ok(!withoutAi.features.includes("assistant"));
-  assert.ok(!withoutAi.permissions.includes("assistant"));
-  const noAiToken = await runAdminCommand(["token", "make", "No AI invite", "without-ai"], {
+  const byId = new Map(ranks.items.map((rank) => [rank.id, rank]));
+  assert.deepEqual(["basic", "basic-plus", "ai", "full-minus", "owner"].map((id) => byId.get(id)?.label), ["Basic", "Basic+", "AI", "Full-", "Owner"]);
+  assert.deepEqual(byId.get("basic").features, ["assistant"]);
+  assert.deepEqual(byId.get("basic-plus").features, ["bookmarks", "history", "assistant"]);
+  assert.deepEqual(byId.get("ai").features, ["bookmarks", "history", "assistant"]);
+  assert.ok(!byId.get("ai").features.includes("settings"));
+  assert.ok(byId.get("full-minus").features.includes("settings"));
+  assert.deepEqual(byId.get("owner").features, byId.get("full-minus").features);
+  const basicToken = await runAdminCommand(["token", "make", "Basic invite", "basic"], {
     databasePath: join(tempDirectory, "nightjar.sqlite"),
   });
-  const aiToken = await runAdminCommand(["token", "make", "AI invite", "with-ai"], {
+  assert.deepEqual(basicToken.features, ["assistant"]);
+  const basicPlusToken = await runAdminCommand(["token", "make", "Basic plus invite", "basic-plus"], {
     databasePath: join(tempDirectory, "nightjar.sqlite"),
   });
-  assert.ok(!noAiToken.features.includes("assistant"));
-  assert.ok(aiToken.features.includes("assistant"));
-  const made = await runAdminCommand(["token", "make", "One person", "basic"], {
+  assert.deepEqual(basicPlusToken.features, ["bookmarks", "history", "assistant"]);
+  const aiToken = await runAdminCommand(["token", "make", "AI invite", "ai"], {
     databasePath: join(tempDirectory, "nightjar.sqlite"),
   });
-  assert.equal(made.type, "created");
-  assert.equal(made.rank, "basic");
-  assert.deepEqual(made.permissions, ["browse", "support"]);
-  const renewal = await runAdminCommand(["token", "renew", made.accountId, "Replacement", "full"], {
+  assert.equal(aiToken.rank, "ai");
+  const fullToken = await runAdminCommand(["token", "make", "Full invite", "full-minus"], {
     databasePath: join(tempDirectory, "nightjar.sqlite"),
   });
-  assert.equal(renewal.type, "created");
-  assert.equal(renewal.rank, "full");
+  const renewal = await runAdminCommand(["token", "renew", fullToken.accountId, "Replacement", "owner"], {
+    databasePath: join(tempDirectory, "nightjar.sqlite"),
+  });
+  assert.equal(renewal.rank, "owner");
   assert.equal(renewal.usageLimit, 1);
+  await assert.rejects(runAdminCommand(["ranks", "delete", "owner"], {
+    databasePath: join(tempDirectory, "nightjar.sqlite"),
+  }), /Built-in access ranks cannot be removed/);
   const custom = await runAdminCommand(["ranks", "create", "Study group", "--permissions", "browse,games,support", "--features", "games,support"], {
     databasePath: join(tempDirectory, "nightjar.sqlite"),
   });
@@ -485,7 +502,164 @@ test("owner can manage ranks and review private support requests", async () => {
   });
   assert.equal(status.response.status, 200);
   const denied = await request("/api/admin/feedback", { cookie });
-  assert.equal(denied.response.status, 401);
+  assert.equal(denied.response.status, 403);
+});
+
+test("Owner rank is server-authorized and the token dashboard never exposes secrets", async () => {
+  const unauthorized = await request("/api/owner/dashboard/tokens", { origin: "https://dashboard.example" });
+  assert.equal(unauthorized.response.status, 401);
+  assert.equal(unauthorized.response.headers.get("access-control-allow-origin"), "https://dashboard.example");
+  assert.equal((await request("/api/owner/dashboard/tokens", { origin: "https://untrusted.example" })).response.status, 403);
+
+  const invitation = await issueToken({ label: "Dashboard reader", rank: "basic-plus" });
+  const regularLogin = await request("/api/auth/login", { method: "POST", body: { token: invitation.token } });
+  const regularCookie = cookieFrom(regularLogin.response, "nj_session");
+  assert.equal((await request("/api/admin/me", { cookie: regularCookie })).response.status, 403);
+  assert.equal((await request("/api/owner/dashboard/tokens", {
+    cookie: regularCookie, origin: "https://dashboard.example",
+  })).response.status, 403);
+
+  const ownerInvite = await issueToken({ label: "Owner dashboard", rank: "owner" });
+  const ownerLogin = await request("/api/auth/login", { method: "POST", body: { token: ownerInvite.token } });
+  const ownerCookie = cookieFrom(ownerLogin.response, "nj_session");
+  assert.equal((await request("/api/admin/me", { cookie: ownerCookie })).response.status, 200);
+  const dashboard = await request("/api/owner/dashboard/tokens", {
+    cookie: ownerCookie, origin: "https://dashboard.example",
+  });
+  assert.equal(dashboard.response.status, 200, JSON.stringify(dashboard.data));
+  assert.equal(dashboard.response.headers.get("access-control-allow-credentials"), "true");
+  assert.equal(dashboard.data.summary.total, dashboard.data.tokens.length);
+  const item = dashboard.data.tokens.find((token) => token.id === invitation.item.id);
+  assert.deepEqual(Object.keys(item).sort(), [
+    "aiLimit", "aiUsed", "createdAt", "expiresAt", "id", "limit", "rank", "revokedAt", "status", "tokenIdMasked", "used",
+  ].sort());
+  assert.equal(item.tokenIdMasked, `••••${item.id.slice(-6)}`);
+  assert.equal(item.aiLimit, 20);
+  assert.equal(item.status, "active");
+  const serialized = JSON.stringify(dashboard.data);
+  assert.ok(!serialized.includes(invitation.token));
+  assert.ok(!serialized.includes(ownerInvite.token));
+  assert.ok(!serialized.includes(app.db.prepare("SELECT token_hash FROM tokens WHERE id = ?").get(invitation.item.id).token_hash));
+
+  const preflight = await fetch(`${baseUrl}/api/owner/dashboard/tokens`, {
+    method: "OPTIONS",
+    headers: {
+      Origin: "https://dashboard.example",
+      "Access-Control-Request-Method": "GET",
+      "Access-Control-Request-Headers": "content-type",
+    },
+  });
+  assert.equal(preflight.status, 204);
+  assert.equal(preflight.headers.get("access-control-allow-methods"), "GET, OPTIONS");
+  assert.equal(preflight.headers.get("access-control-allow-origin"), "https://dashboard.example");
+});
+
+test("friends can be added one at a time without receiving admin access", async () => {
+  assert.deepEqual((await request("/api/admin/friends", { cookie: adminCookie })).data.items, []);
+  const friendInvite = await issueToken({ label: "Private friend", rank: "basic-plus", friend: true });
+  const friendList = await request("/api/admin/friends", { cookie: adminCookie });
+  assert.equal(friendList.response.status, 200);
+  assert.equal(friendList.data.items.length, 1);
+  assert.equal(friendList.data.items[0].id, friendInvite.item.accountId);
+  const friendLogin = await request("/api/auth/login", { method: "POST", body: { token: friendInvite.token } });
+  assert.equal(friendLogin.response.status, 200, JSON.stringify(friendLogin.data));
+  const friendCookie = cookieFrom(friendLogin.response, "nj_session");
+  assert.equal((await request("/api/admin/summary", { cookie: friendCookie })).response.status, 403);
+  const removed = await request(`/api/admin/friends/${friendInvite.item.accountId}`, {
+    method: "DELETE", cookie: adminCookie, csrf: adminCsrf,
+  });
+  assert.equal(removed.response.status, 200);
+  assert.equal((await request("/api/admin/friends", { cookie: adminCookie })).data.items.length, 0);
+  assert.equal((await request("/api/session", { cookie: friendCookie })).response.status, 200, "removing a friend entry must not revoke their account");
+  assert.equal((await request(`/api/admin/friends/${friendInvite.item.accountId}`, {
+    method: "DELETE", cookie: friendCookie, csrf: friendLogin.data.csrf,
+  })).response.status, 403);
+});
+
+test("project areas are private to each signed-in account", async () => {
+  const firstInvite = await issueToken({ label: "Alex" });
+  const firstLogin = await request("/api/auth/login", { method: "POST", body: { token: firstInvite.token } });
+  assert.equal(firstLogin.response.status, 200, JSON.stringify(firstLogin.data));
+  const firstCookie = cookieFrom(firstLogin.response, "nj_session");
+  const defaults = await request("/api/project-areas", { cookie: firstCookie });
+  assert.deepEqual(defaults.data.items.map((area) => area.label).sort(), ["Alex's Proxy", "Alex's games"].sort());
+  const created = await request("/api/project-areas", {
+    method: "POST", cookie: firstCookie, csrf: firstLogin.data.csrf,
+    body: { kind: "custom", name: "Research" },
+  });
+  assert.equal(created.response.status, 201);
+  assert.equal(created.data.item.label, "Alex's Research");
+
+  const secondInvite = await issueToken({ label: "Morgan" });
+  const secondLogin = await request("/api/auth/login", { method: "POST", body: { token: secondInvite.token } });
+  assert.equal(secondLogin.response.status, 200, JSON.stringify(secondLogin.data));
+  const secondCookie = cookieFrom(secondLogin.response, "nj_session");
+  assert.deepEqual((await request("/api/project-areas", { cookie: secondCookie })).data.items.map((area) => area.label).sort(), ["Morgan's Proxy", "Morgan's games"].sort());
+  assert.equal((await request(`/api/project-areas/${created.data.item.id}`, {
+    method: "DELETE", cookie: secondCookie, csrf: secondLogin.data.csrf,
+  })).response.status, 404);
+  const renamed = await request(`/api/project-areas/${created.data.item.id}`, {
+    method: "PATCH", cookie: firstCookie, csrf: firstLogin.data.csrf, body: { name: "Writing" },
+  });
+  assert.equal(renamed.response.status, 200);
+  assert.equal(renamed.data.item.label, "Alex's Writing");
+});
+
+test("Basic AI quota is token-scoped and Full- customization is permission-gated", async () => {
+  const basic = await issueToken({ label: "Basic AI quota", rank: "basic", permissions: ["browse", "assistant"], features: ["assistant"] });
+  const basicLogin = await request("/api/auth/login", { method: "POST", body: { token: basic.token } });
+  assert.equal(basicLogin.response.status, 200, JSON.stringify(basicLogin.data));
+  const basicCookie = cookieFrom(basicLogin.response, "nj_session");
+  app.db.prepare("UPDATE tokens SET ai_usage_count = 20 WHERE id = ?").run(basic.item.id);
+  const exhausted = await request("/api/capabilities", { cookie: basicCookie });
+  assert.equal(exhausted.data.ai.allowed, false);
+  assert.deepEqual(exhausted.data.ai.usage, { limit: 20, used: 20, remaining: 0 });
+  const blocked = await request("/api/ai/chat", {
+    method: "POST", cookie: basicCookie, csrf: basicLogin.data.csrf,
+    body: { messages: [{ role: "user", content: "one more" }] },
+  });
+  assert.equal(blocked.response.status, 429);
+  assert.equal(blocked.data.code, "ai_quota_exhausted");
+
+  const ai = await issueToken({ label: "Unlimited AI", rank: "ai", permissions: ["browse", "bookmarks", "history", "assistant"], features: ["bookmarks", "history", "assistant"] });
+  const aiLogin = await request("/api/auth/login", { method: "POST", body: { token: ai.token } });
+  assert.equal(aiLogin.response.status, 200, JSON.stringify(aiLogin.data));
+  const aiCookie = cookieFrom(aiLogin.response, "nj_session");
+  app.db.prepare("UPDATE tokens SET ai_usage_count = 999 WHERE id = ?").run(ai.item.id);
+  const response = await request("/api/ai/chat", {
+    method: "POST", cookie: aiCookie, csrf: aiLogin.data.csrf,
+    body: { messages: [{ role: "user", content: "hello" }] },
+  });
+  assert.equal(response.response.status, 200);
+  assert.match(response.data, /Hello /);
+  assert.match(response.data, /from local\./);
+  assert.equal(app.db.prepare("SELECT ai_usage_count FROM tokens WHERE id = ?").get(ai.item.id).ai_usage_count, 1000);
+
+  const customOrder = ["admin-link", "help-open", "settings-open", "theme-toggle", "open-regular", "games-open", "assistant-open", "downloads-open", "history-open", "bookmarks-open"];
+  const denied = await request("/api/settings", {
+    method: "PUT", cookie: basicCookie, csrf: basicLogin.data.csrf,
+    body: { settings: { ...basicLogin.data.account.settings, customTitle: "Not allowed", customIcon: "X", toolbarOrder: customOrder } },
+  });
+  assert.equal(denied.response.status, 403);
+  const full = await issueToken({ label: "Customizable", rank: "full-minus" });
+  const fullLogin = await request("/api/auth/login", { method: "POST", body: { token: full.token } });
+  assert.equal(fullLogin.response.status, 200, JSON.stringify(fullLogin.data));
+  const fullCookie = cookieFrom(fullLogin.response, "nj_session");
+  const saved = await request("/api/settings", {
+    method: "PUT", cookie: fullCookie, csrf: fullLogin.data.csrf,
+    body: {
+      settings: {
+        ...fullLogin.data.account.settings,
+        customTitle: "Alex Workspace",
+        customIcon: "🌙",
+        toolbarOrder: customOrder,
+      },
+    },
+  });
+  assert.equal(saved.response.status, 200, JSON.stringify(saved.data));
+  assert.equal(saved.data.settings.customTitle, "Alex Workspace");
+  assert.equal(saved.data.settings.customIcon, "🌙");
+  assert.deepEqual(saved.data.settings.toolbarOrder, customOrder);
 });
 
 test("owner account and site controls are enforced server-side", async () => {
@@ -500,8 +674,8 @@ test("owner account and site controls are enforced server-side", async () => {
   const ticketClaims = JSON.parse(Buffer.from(ticketPayload, "base64url").toString("utf8"));
   assert.equal(ticketClaims.audience, "nightjar-linux-companion");
   assert.ok(ticketClaims.expiresAt > Date.now());
-  const userInvite = await issueToken({ label: "Managed account", rank: "full" });
-  const assistantInvite = await issueToken({ label: "AI control account", rank: "full" });
+  const userInvite = await issueToken({ label: "Managed account", rank: "full-minus" });
+  const assistantInvite = await issueToken({ label: "AI control account", rank: "full-minus" });
   const userLogin = await request("/api/auth/login", { method: "POST", body: { token: userInvite.token } });
   const userCookie = cookieFrom(userLogin.response, "nj_session");
   const assistantLogin = await request("/api/auth/login", { method: "POST", body: { token: assistantInvite.token } });
@@ -513,7 +687,7 @@ test("owner account and site controls are enforced server-side", async () => {
     method: "PATCH", cookie: adminCookie, csrf: adminCsrf,
     body: {
       label: "Managed reader",
-      rank: "standard",
+      rank: "basic-plus",
       permissions: ["browse", "bookmarks"],
       features: ["bookmarks"],
       settings: account.settings,

@@ -1,11 +1,37 @@
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
-const state = { csrf: "", summary: null, siteControls: null, tokens: [], accounts: [], ranks: [], sessions: [], audits: [], feedback: [], twoFactor: false, toastTimer: 0 };
+const state = { csrf: "", summary: null, siteControls: null, tokens: [], accounts: [], ranks: [], friends: [], sessions: [], audits: [], feedback: [], twoFactor: false, toastTimer: 0 };
 
 function esc(value = "") {
   return String(value).replace(/[&<>"']/g, (char) => ({
     "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
   })[char]);
+}
+
+function renderFriends() {
+  const root = $("#friend-list");
+  if (!state.friends.length) {
+    root.innerHTML = '<div class="table-empty">No friends added yet. Add one person to create the first friend entry; you can add more one at a time.</div>';
+    return;
+  }
+  root.innerHTML = `<div class="admin-table-wrap"><table class="admin-table"><thead><tr><th>FRIEND</th><th>RANK</th><th>STATUS</th><th>ADDED</th><th></th></tr></thead><tbody>${state.friends.map((friend) => `<tr><td><div class="table-primary">${esc(friend.label)}</div><div class="table-secondary mono">${esc(friend.id.slice(0, 8))}</div></td><td>${esc(friend.rank)}</td><td>${statusBadge(friend.status)}</td><td>${esc(date(friend.createdAt))}</td><td><div class="table-actions"><button class="secondary-button" type="button" data-manage-friend="${esc(friend.id)}">Manage</button><button class="danger-button" type="button" data-remove-friend="${esc(friend.id)}">Remove</button></div></td></tr>`).join("")}</tbody></table></div>`;
+  $$("[data-manage-friend]").forEach((button) => button.addEventListener("click", () => editAccount(button.dataset.manageFriend)));
+  $$("[data-remove-friend]").forEach((button) => button.addEventListener("click", () => void removeFriend(button.dataset.removeFriend)));
+}
+
+async function loadFriends() {
+  const result = await api("/api/admin/friends");
+  state.friends = result.items;
+  renderFriends();
+}
+
+async function removeFriend(id) {
+  if (!confirm("Remove this person from the Friends list? Their account and access will remain unchanged.")) return;
+  try {
+    await api(`/api/admin/friends/${id}`, { method: "DELETE" });
+    await loadFriends();
+    toast("Friend removed from the list.");
+  } catch (error) { toast(error.message); }
 }
 
 function icon(name) {
@@ -133,7 +159,7 @@ function renderRanks() {
     root.innerHTML = '<div class="table-empty">No access ranks are configured. Add a rank before creating an invitation.</div>';
     return;
   }
-  root.innerHTML = `<div class="rank-grid">${state.ranks.map((rank) => `<article class="rank-card"><div class="rank-heading"><strong>${esc(rank.label)}</strong><button class="danger-button" type="button" data-delete-rank="${esc(rank.id)}" aria-label="Remove ${esc(rank.label)} rank">Remove</button></div><div class="rank-id mono">${esc(rank.id)}</div><div class="token-permissions">${rank.features.includes("assistant") ? "<span>AI enabled</span>" : "<span>AI disabled</span>"}${rank.permissions.map((item) => `<span>${esc(item)}</span>`).join("")}</div><div class="table-secondary">Features: ${esc(rank.features.join(", ") || "none")}</div></article>`).join("")}</div>`;
+  root.innerHTML = `<div class="rank-grid">${state.ranks.map((rank) => `<article class="rank-card"><div class="rank-heading"><strong>${esc(rank.label)}</strong>${["basic", "basic-plus", "ai", "full-minus", "owner"].includes(rank.id) ? '<span class="status-badge active">built in</span>' : `<button class="danger-button" type="button" data-delete-rank="${esc(rank.id)}" aria-label="Remove ${esc(rank.label)} rank">Remove</button>`}</div><div class="rank-id mono">${esc(rank.id)}</div><div class="token-permissions">${rank.features.includes("assistant") ? `<span>${["basic", "basic-plus"].includes(rank.id) ? "AI · 20 requests per token" : "Unlimited AI"}</span>` : "<span>AI disabled</span>"}${rank.permissions.map((item) => `<span>${esc(item)}</span>`).join("")}</div><div class="table-secondary">Features: ${esc(rank.features.join(", ") || "none")}</div></article>`).join("")}</div>`;
   $$("[data-delete-rank]").forEach((button) => button.addEventListener("click", () => void deleteRank(button.dataset.deleteRank)));
 }
 
@@ -294,6 +320,7 @@ async function loadTokens() {
   renderTokens();
   renderRanks();
   renderAccounts();
+  renderFriends();
 }
 
 async function loadSiteControls() {
@@ -515,6 +542,7 @@ function setPanel(name) {
   $$(".rail-item[data-panel]").forEach((button) => button.classList.toggle("selected", button.dataset.panel === name));
   if (name === "invitations") void loadTokens().catch((error) => toast(error.message));
   if (name === "accounts") void loadTokens().catch((error) => toast(error.message));
+  if (name === "friends") void Promise.all([loadTokens(), loadFriends()]).catch((error) => toast(error.message));
   if (name === "site-controls") void loadSiteControls().catch((error) => toast(error.message));
   if (name === "sessions") void loadSessions().catch((error) => toast(error.message));
   if (name === "support") void loadFeedback().catch((error) => toast(error.message));
@@ -560,7 +588,7 @@ async function deleteRank(id) {
 }
 
 function inviteForm() {
-  const defaultRank = state.ranks.find((rank) => rank.id === "without-ai") ?? state.ranks.find((rank) => rank.id === "standard") ?? state.ranks[0];
+  const defaultRank = state.ranks.find((rank) => rank.id === "basic-plus") ?? state.ranks[0];
   const accountOptions = state.accounts.filter((account) => !account.revokedAt).map((account) => `<option value="${esc(account.id)}">${esc(account.label)} · ${esc(account.id.slice(0, 8))}</option>`).join("");
   const rankOptions = `<option value="">Use saved account permissions</option>${state.ranks.map((rank) => `<option value="${esc(rank.id)}" ${rank.id === defaultRank?.id ? "selected" : ""}>${esc(rank.label)} · ${rank.features.includes("assistant") ? "AI enabled" : "No AI"}</option>`).join("")}`;
   return `<form id="invite-form" class="admin-invite-form">
@@ -601,10 +629,12 @@ function inviteForm() {
   </form>`;
 }
 
-function createInviteDialog() {
+function createInviteDialog(friendMode = false) {
   openDialog({
-    title: "Create invitation",
-    description: "The random token is displayed once. Copy it now and share it securely.",
+    title: friendMode ? "Add a friend" : "Create invitation",
+    description: friendMode
+      ? "Add one person at a time. Their regular account is not an owner account unless you explicitly select the Owner rank."
+      : "The random token is displayed once. Copy it now and share it securely.",
     wide: true,
     content: inviteForm(),
     footer: '<span class="muted" style="font-size:9px">No raw invitation token is stored.</span><div class="dialog-footer-right"><button class="secondary-button" data-close-dialog type="button">Cancel</button><button id="issue-invite" class="primary-button" type="button">Create token</button></div>',
@@ -675,10 +705,12 @@ function createInviteDialog() {
       permissions,
       features,
       settings,
+      ...(friendMode ? { friend: true } : {}),
     };
     try {
       const result = await api("/api/admin/tokens", { method: "POST", body });
       await loadTokens();
+      if (friendMode) await loadFriends();
       showToken(result.token, result.item);
     } catch (error) {
       toast(error.message);
@@ -786,9 +818,11 @@ $("#admin-login-form").addEventListener("submit", async (event) => {
 $$(".rail-item[data-panel]").forEach((button) => button.addEventListener("click", () => setPanel(button.dataset.panel)));
 $$("[data-go-panel]").forEach((button) => button.addEventListener("click", () => setPanel(button.dataset.goPanel)));
 $("#create-invite").addEventListener("click", createInviteDialog);
+$("#add-friend").addEventListener("click", () => createInviteDialog(true));
 $("#create-rank").addEventListener("click", createRankDialog);
 $("#refresh-tokens").addEventListener("click", () => void loadTokens().catch((error) => toast(error.message)));
 $("#refresh-accounts").addEventListener("click", () => void loadTokens().catch((error) => toast(error.message)));
+$("#refresh-friends").addEventListener("click", () => void loadFriends().catch((error) => toast(error.message)));
 $("#refresh-sessions").addEventListener("click", () => void loadSessions().catch((error) => toast(error.message)));
 $("#refresh-feedback").addEventListener("click", () => void loadFeedback().catch((error) => toast(error.message)));
 $("#refresh-audit").addEventListener("click", () => void api("/api/admin/audit?limit=100").then((result) => { state.audits = result.items; renderAudit(); }).catch((error) => toast(error.message)));
