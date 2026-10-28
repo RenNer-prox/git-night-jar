@@ -58,8 +58,44 @@ function frameAddress(frame: HTMLIFrameElement, fallback: string): string {
 
 function reportUrl(tabId: string, frameState: FrameState): void {
   const url = frameAddress(frameState.frame, frameState.url);
+  if (!url) return;
   frameState.url = url;
   send({ type: "nightjar:url", tabId, url, title: titleFor(frameState.frame, new URL(url).hostname) });
+}
+
+function handleSpecialNavigationClick(event: MouseEvent, frame: HTMLIFrameElement): void {
+  const element = event.target as Element | null;
+  const link = element?.closest("a");
+  if (!link) return;
+  const href = link.getAttribute("href-hammerhead-stored-value") ?? link.href;
+  let destination: URL;
+  try {
+    destination = new URL(href, frame.contentWindow?.location.href);
+  } catch {
+    return;
+  }
+  const hostname = destination.hostname.toLowerCase();
+  const youtubeHost = hostname === "youtube.com" || hostname.endsWith(".youtube.com") || hostname === "youtu.be";
+  const youtubePath = hostname === "youtu.be"
+    ? /^\/[\w-]{11}(?:\/|$)/.test(destination.pathname)
+    : /^\/(?:watch|shorts|live|embed|v)(?:\/|$)/i.test(destination.pathname);
+  const youtubeVideo = destination.protocol === "https:" && youtubeHost && youtubePath;
+  if (youtubeVideo) {
+    event.preventDefault();
+    event.stopPropagation();
+    send({ type: "nightjar:youtube-navigate", url: destination.href });
+    return;
+  }
+  if (destination.protocol !== "https:" || hostname !== "accounts.google.com") return;
+  event.preventDefault();
+  event.stopPropagation();
+  // Google rejects its sign-in flow inside an embedded proxy frame.
+  const popup = window.open(proxiedUrl(destination.href), "_blank");
+  if (!popup) {
+    send({ type: "nightjar:error", message: "Your browser blocked the Google sign-in window. Allow pop-ups and try again." });
+    return;
+  }
+  popup.opener = null;
 }
 
 function createTabFrame(tabId: string): FrameState {
@@ -68,10 +104,11 @@ function createTabFrame(tabId: string): FrameState {
   frame.className = "rammerhead-frame";
   frame.title = "Web page";
   frame.hidden = true;
-  frame.setAttribute("allow", "camera 'none'; microphone 'none'; geolocation 'none'; display-capture 'none'; clipboard-read 'none'; clipboard-write 'none'");
+  frame.setAttribute("allow", "autoplay; encrypted-media; fullscreen; picture-in-picture; camera 'none'; microphone 'none'; geolocation 'none'; display-capture 'none'; clipboard-read 'none'; clipboard-write 'none'");
   const frameState = { frame, url: "" };
   frame.addEventListener("load", () => {
     if (!frames.has(tabId)) return;
+    frame.contentDocument?.addEventListener("click", (event) => handleSpecialNavigationClick(event, frame), true);
     reportUrl(tabId, frameState);
     send({
       type: "nightjar:loaded",

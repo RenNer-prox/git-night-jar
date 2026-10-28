@@ -1,5 +1,8 @@
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
+const API_ORIGIN = new URL(document.querySelector('meta[name="nightjar-api-base"]')?.content || location.origin, location.href).origin;
+const API_MODE = API_ORIGIN !== location.origin;
+const API_SESSION_KEY = `nightjar.api-session:${API_ORIGIN}`;
 const iconPaths = {
   back: '<path d="m15 18-6-6 6-6"/><path d="M20 12H9"/>',
   forward: '<path d="m9 18 6-6-6-6"/><path d="M4 12h11"/>',
@@ -70,11 +73,21 @@ const state = {
   pageLoading: false,
   pageFrameRequestedUrl: "",
   proxyOrigin: "",
+  gameOrigin: "",
   proxySessionId: "",
   proxyReady: false,
+  games: null,
+  gamesFetchAbort: null,
+  gameFetchAbort: null,
+  social: { friends: [], incoming: [], outgoing: [], activeFriend: null, messages: [], refreshTimer: 0 },
+  activeGame: null,
+  gamesVisibleCount: 60,
   gameTimer: 0,
   game: null,
 };
+const GAMES_LINKS_URL = "https://api.bearstool.com/gamelinks";
+const GAMES_PAGE_SIZE = 60;
+state.apiToken = API_MODE ? localStorage.getItem(API_SESSION_KEY) ?? "" : "";
 const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
 const coarsePointer = matchMedia("(pointer: coarse)");
 
@@ -90,6 +103,89 @@ function originOf(address) {
   } catch {
     return address;
   }
+}
+
+function youtubeVideoId(address) {
+  try {
+    const url = new URL(address);
+    const hostname = url.hostname.toLowerCase();
+    const youtubeHost = hostname === "youtube.com" || hostname.endsWith(".youtube.com");
+    if (url.protocol !== "https:" || url.username || url.password) return "";
+    if (hostname === "youtu.be") return url.pathname.slice(1).split("/")[0].match(/^[\w-]{11}$/)?.[0] ?? "";
+    if (!youtubeHost) return "";
+    const pathMatch = url.pathname.match(/^\/(?:shorts|live|embed|v)\/([\w-]{11})(?:\/|$)/i);
+    if (pathMatch) return pathMatch[1];
+    if (url.pathname === "/watch") return url.searchParams.get("v")?.match(/^[\w-]{11}$/)?.[0] ?? "";
+    return "";
+  } catch {
+    return "";
+  }
+}
+
+function possibleYoutubeVideoUrl(address) {
+  const raw = address.trim();
+  const candidate = /^https?:\/\//i.test(raw)
+    ? raw
+    : /^(?:(?:www|m)\.)?(?:youtube\.com|youtu\.be)(?:\/|$)/i.test(raw)
+      ? `https://${raw}`
+      : "";
+  return candidate && youtubeVideoId(candidate) ? candidate : "";
+}
+
+function showYoutubeVideo(tab, address, { replace = false } = {}) {
+  const videoId = youtubeVideoId(address);
+  if (!videoId) return false;
+  clearTimeout(state.pageTimer);
+  if (state.proxyReady) postProxy({ type: "nightjar:close", tabId: tab.id });
+  if (replace && tab.index >= 0) tab.stack[tab.index] = address;
+  else {
+    tab.stack = tab.stack.slice(0, tab.index + 1);
+    tab.stack.push(address);
+    tab.index = tab.stack.length - 1;
+  }
+  tab.url = address;
+  tab.title = "YouTube video";
+  if (tab.id === state.activeId) {
+    $("#address").value = address;
+    $("#home-surface").hidden = true;
+    $("#games-surface").hidden = true;
+    $("#page-panel").hidden = false;
+    $("#page-frame").hidden = true;
+    $("#youtube-player").hidden = false;
+    $("#page-fallback").hidden = true;
+    $("#youtube-player-title").textContent = "YouTube video";
+    $("#youtube-frame").src = `https://www.youtube-nocookie.com/embed/${videoId}?autoplay=1&playsinline=1&rel=0`;
+    $("#open-regular").hidden = false;
+    setLoading(false);
+    setStatus("YouTube video · embedded player");
+    void syncBookmarkButton();
+  }
+  renderTabs();
+  saveLocalState();
+  if (state.account?.permissions.includes("history")) {
+    api("/api/history", { method: "POST", body: { url: address, title: tab.title } })
+      .catch((error) => toast(error.message));
+  }
+  return true;
+}
+
+function nightjarGameRoute(address) {
+  try {
+    const url = new URL(address);
+    if (url.protocol !== "nightjar:" || url.hostname !== "games" || url.username || url.password || url.search || url.hash) return null;
+    if (!url.pathname || url.pathname === "/") return { address: "nightjar://games", gameId: null };
+    const match = url.pathname.match(/^\/([^/]+)$/);
+    if (!match) return null;
+    const gameId = decodeURIComponent(match[1]);
+    if (!gameId || gameId.length > 128) return null;
+    return { address: `nightjar://games/${encodeURIComponent(gameId)}`, gameId };
+  } catch {
+    return null;
+  }
+}
+
+function isRestorableAddress(address) {
+  return /^https?:\/\//i.test(address) || nightjarGameRoute(address) !== null;
 }
 
 function activeTab() {
@@ -120,8 +216,9 @@ function loadLocalState() {
       state.tabs = saved.tabs.slice(0, 12).map((tab) => ({
         id: typeof tab.id === "string" ? tab.id : crypto.randomUUID(),
         title: typeof tab.title === "string" ? tab.title.slice(0, 90) : "New tab",
-        url: typeof tab.url === "string" && /^https?:\/\//.test(tab.url) ? tab.url : "",
-        stack: Array.isArray(tab.stack) ? tab.stack.filter((url) => typeof url === "string" && /^https?:\/\//.test(url)).slice(0, 50) : [],
+        url: typeof tab.url === "string" && isRestorableAddress(tab.url) ? (nightjarGameRoute(tab.url)?.address ?? tab.url) : "",
+        stack: Array.isArray(tab.stack) ? tab.stack.filter((url) => typeof url === "string" && isRestorableAddress(url)).slice(0, 50)
+          .map((url) => nightjarGameRoute(url)?.address ?? url) : [],
         index: Number.isInteger(tab.index) ? Math.min(Math.max(tab.index, -1), 49) : -1,
       }));
       state.activeId = state.tabs.some((tab) => tab.id === saved.activeId) ? saved.activeId : state.tabs[0].id;
@@ -200,8 +297,10 @@ function setLoading(loading) {
 
 function createTab(activate = true, initialUrl = "") {
   const tab = { id: crypto.randomUUID(), title: state.settings?.homepage === "blank" ? "Blank page" : "New tab", url: "", stack: [], index: -1 };
+  const gameRoute = initialUrl ? nightjarGameRoute(initialUrl) : null;
   const homepage = state.settings?.homepage;
   if (!initialUrl && homepage && !["home", "blank"].includes(homepage)) initialUrl = homepage;
+  if (gameRoute) tab.title = gameRoute.gameId === null ? "Games" : `Game ${gameRoute.gameId}`;
   state.tabs.push(tab);
   if (initialUrl) {
     tab.url = initialUrl;
@@ -216,7 +315,7 @@ function createTab(activate = true, initialUrl = "") {
   else if (!state.activeId) state.activeId = tab.id;
   saveLocalState();
   renderTabs();
-  if (initialUrl && activate) void navigate(initialUrl, { replace: true, tab });
+  if (initialUrl && activate && !gameRoute) void navigate(initialUrl, { replace: true, tab });
   return tab;
 }
 
@@ -256,12 +355,14 @@ async function prepareProxyShell() {
   try {
     const result = await api("/api/browser/grant", { method: "POST", body: {} });
     if (!/^https?:\/\/[^/]+$/.test(result.proxyOrigin)) throw new Error("The private browsing engine returned an invalid origin.");
+    if (!/^https?:\/\/[^/]+$/.test(result.gameOrigin)) throw new Error("The isolated game runtime returned an invalid origin.");
     state.proxyOrigin = result.proxyOrigin;
+    state.gameOrigin = result.gameOrigin;
     if (!/^[a-f0-9]{32}$/i.test(result.sessionId)) throw new Error("The Rammerhead engine returned an invalid session.");
     state.proxySessionId = result.sessionId;
     state.proxyReady = false;
     const frame = $("#page-frame");
-    const shellUrl = `${state.proxyOrigin}/proxy-shell.html`;
+    const shellUrl = `${state.proxyOrigin}/proxy-shell.html?appOrigin=${encodeURIComponent(location.origin)}`;
     if (frame.src !== shellUrl) frame.src = shellUrl;
   } catch (error) {
     toast(error.message);
@@ -279,6 +380,9 @@ window.addEventListener("message", (event) => {
         if (!/^https?:\/\/[^/]+$/.test(result.proxyOrigin) || result.proxyOrigin !== state.proxyOrigin) {
           throw new Error("The private browsing engine returned an invalid origin.");
         }
+        if (!/^https?:\/\/[^/]+$/.test(result.gameOrigin) || result.gameOrigin !== state.gameOrigin) {
+          throw new Error("The isolated game runtime returned an invalid origin.");
+        }
         if (!/^[a-f0-9]{32}$/i.test(result.sessionId)) throw new Error("The Rammerhead engine returned an invalid session.");
         state.proxySessionId = result.sessionId;
         postProxy({ type: "nightjar:init", sessionId: state.proxySessionId, appOrigin: location.origin });
@@ -293,7 +397,7 @@ window.addEventListener("message", (event) => {
     state.proxyReady = true;
     state.proxySessionId = "";
     const tab = activeTab();
-    if (tab?.url) {
+    if (tab?.url && !youtubeVideoId(tab.url)) {
       postProxy({ type: "nightjar:select", tabId: tab.id, url: tab.url });
       setStatus(`Opening ${originOf(tab.url)} · private browsing engine`);
     } else {
@@ -328,6 +432,13 @@ window.addEventListener("message", (event) => {
       saveLocalState();
       if (tab.id === state.activeId) setStatus(`Page loaded · ${originOf(tab.url)} · proxied web content`);
     }
+  } else if (event.data.type === "nightjar:youtube-navigate") {
+    if (typeof event.data.url === "string" && youtubeVideoId(event.data.url)) {
+      const tab = activeTab();
+      if (tab) showYoutubeVideo(tab, event.data.url);
+    }
+  } else if (event.data.type === "nightjar:notice") {
+    if (typeof event.data.message === "string") toast(event.data.message);
   } else if (event.data.type === "nightjar:error") {
     setLoading(false);
     $("#page-fallback").hidden = false;
@@ -353,10 +464,66 @@ async function syncBookmarkButton() {
 function selectTab(id) {
   const tab = state.tabs.find((item) => item.id === id);
   if (!tab) return;
+  closeGamePlayer();
+  $("#youtube-frame").src = "about:blank";
+  $("#youtube-player").hidden = true;
+  $("#page-frame").hidden = false;
   state.activeId = id;
   renderTabs();
   $("#address").value = tab.url;
   $("#page-fallback").hidden = true;
+  const gameRoute = nightjarGameRoute(tab.url);
+  if (gameRoute) {
+    tab.title = gameRoute.gameId === null ? "Games" : `Game ${gameRoute.gameId}`;
+    renderTabs();
+    $("#home-surface").hidden = true;
+    $("#page-panel").hidden = true;
+    const allowed = state.account?.permissions.includes("games") && state.account.features.includes("games");
+    $("#games-surface").hidden = !allowed;
+    $("#open-regular").hidden = true;
+    if (!allowed) {
+      $("#home-surface").hidden = false;
+      setStatus("Games are not enabled for this account.");
+      toast("Games are not enabled for this account.");
+      saveLocalState();
+      return;
+    }
+    $("#games-catalog").hidden = gameRoute.gameId !== null;
+    $("#game-player").hidden = gameRoute.gameId === null;
+    setLoading(false);
+    setStatus(gameRoute.gameId === null ? "Games · loaded directly without the proxy" : `Loading Game ${gameRoute.gameId} directly…`);
+    saveLocalState();
+    if (gameRoute.gameId === null) {
+      if (state.games === null) void loadGamesCatalog();
+      else renderGamesCatalog();
+    } else {
+      loadGameById(gameRoute.gameId);
+    }
+    return;
+  }
+  if (youtubeVideoId(tab.url)) {
+    if (state.proxyReady) postProxy({ type: "nightjar:close", tabId: tab.id });
+    $("#games-surface").hidden = true;
+    $("#page-panel").hidden = false;
+    $("#page-frame").hidden = true;
+    $("#youtube-player").hidden = false;
+    $("#youtube-player-title").textContent = "YouTube video";
+    const videoId = youtubeVideoId(tab.url);
+    const frame = $("#youtube-frame");
+    const expectedSrc = `https://www.youtube-nocookie.com/embed/${videoId}?autoplay=1&playsinline=1&rel=0`;
+    if (frame.src !== expectedSrc) frame.src = expectedSrc;
+    $("#home-surface").hidden = true;
+    $("#open-regular").hidden = false;
+    setLoading(false);
+    setStatus("YouTube video · embedded player");
+    saveLocalState();
+    renderTabs();
+    return;
+  }
+  $("#youtube-player").hidden = true;
+  $("#youtube-frame").src = "about:blank";
+  $("#page-frame").hidden = false;
+  $("#games-surface").hidden = true;
   if (tab.url) {
     $("#home-surface").hidden = true;
     $("#page-panel").hidden = false;
@@ -396,9 +563,33 @@ async function navigate(address, { replace = false, tab = activeTab() } = {}) {
   if (!raw) return;
   $("#address").blur();
   $("#home-query").blur();
+  const candidateVideoUrl = possibleYoutubeVideoUrl(raw);
+  if (candidateVideoUrl && showYoutubeVideo(tab, candidateVideoUrl, { replace })) return;
+  if (/^nightjar:/i.test(raw)) {
+    const gameRoute = nightjarGameRoute(raw);
+    if (!gameRoute) {
+      toast("That Nightjar page address is not supported.");
+      return;
+    }
+    if (replace && tab.index >= 0) tab.stack[tab.index] = gameRoute.address;
+    else {
+      tab.stack = tab.stack.slice(0, tab.index + 1);
+      tab.stack.push(gameRoute.address);
+      tab.index = tab.stack.length - 1;
+    }
+    tab.url = gameRoute.address;
+    tab.title = gameRoute.gameId === null ? "Games" : `Game ${gameRoute.gameId}`;
+    if (tab.id === state.activeId) selectTab(tab.id);
+    else {
+      renderTabs();
+      saveLocalState();
+    }
+    return;
+  }
   try {
     const result = await api(`/api/browser/resolve?q=${encodeURIComponent(raw)}`);
     const url = result.url;
+    if (showYoutubeVideo(tab, url, { replace })) return;
     if (replace && tab.index >= 0) tab.stack[tab.index] = url;
     else {
       tab.stack = tab.stack.slice(0, tab.index + 1);
@@ -487,6 +678,8 @@ function closeTab(id) {
 }
 
 function showHome() {
+  closeGamePlayer();
+  $("#games-surface").hidden = true;
   const homepage = state.settings.homepage;
   if (homepage === "home") {
     const tab = activeTab();
@@ -517,8 +710,8 @@ function applyDisplay(result) {
   state.settings = { ...defaults, ...result.account.settings, privacy: { ...defaults.privacy, ...(result.account.settings?.privacy ?? {}) } };
   $("#signin").hidden = true;
   $("#browser").hidden = false;
-  $("#account-label").textContent = state.account.label;
-  $(".avatar").textContent = state.account.label.slice(0, 1).toUpperCase();
+  $("#account-label").textContent = state.account.username || state.account.label;
+  $(".avatar").textContent = (state.account.username || state.account.label).slice(0, 1).toUpperCase();
   applySettings();
   applyAccountFeatures();
   $("#home-date").textContent = new Intl.DateTimeFormat(undefined, { dateStyle: "medium" }).format(new Date());
@@ -531,6 +724,7 @@ function applyDisplay(result) {
   if (activeTab()) selectTab(activeTab().id);
   void prepareProxyShell();
   document.title = `Nightjar — ${state.account.label}`;
+  if (!state.account.username) openUsernameClaim();
 }
 
 function applyAccountFeatures() {
@@ -542,6 +736,11 @@ function applyAccountFeatures() {
   $("#theme-toggle").hidden = !permits("settings");
   $("#bookmark-current").hidden = !permits("bookmarks");
   $("#games-open").hidden = !permits("games");
+  if (!permits("games") && !$("#games-surface").hidden) {
+    closeGamePlayer();
+    $("#games-surface").hidden = true;
+    $("#home-surface").hidden = false;
+  }
   $("#admin-link").hidden = state.account?.rank !== "owner";
 }
 
@@ -609,12 +808,13 @@ async function api(path, options = {}) {
   const headers = { Accept: "application/json" };
   if (options.body !== undefined) headers["Content-Type"] = "application/json";
   if (!["GET", "HEAD"].includes(method) && state.csrf) headers["X-NJ-CSRF"] = state.csrf;
+  if (API_MODE && state.apiToken) headers.Authorization = `Bearer ${state.apiToken}`;
   let response;
   try {
-    response = await fetch(path, {
+    response = await fetch(new URL(path, API_ORIGIN), {
       method,
       headers,
-      credentials: "same-origin",
+      credentials: API_MODE ? "omit" : "same-origin",
       cache: "no-store",
       body: options.body === undefined ? undefined : JSON.stringify(options.body),
     });
@@ -623,8 +823,8 @@ async function api(path, options = {}) {
   }
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
-    if (response.status === 401 && state.account) signOut(false);
-    throw new Error(data.error ?? "The request could not be completed.");
+    if (response.status === 401 && data.code === "authentication_required" && state.account) signOut(false);
+    throw Object.assign(new Error(data.error ?? "The request could not be completed."), { code: data.code, status: response.status });
   }
   return data;
 }
@@ -675,70 +875,70 @@ function renderQuickLinks() {
     button.addEventListener("click", () => void navigate(item.url));
     root.append(button);
   }
+}
 
-  function renderProjectAreas() {
-    const root = $("#project-area-list");
-    if (!state.projectAreas.length) {
-      root.innerHTML = '<p class="project-area-empty">No project areas yet. Add one for your Proxy, games, or another project.</p>';
-      return;
+function renderProjectAreas() {
+  const root = $("#project-area-list");
+  if (!state.projectAreas.length) {
+    root.innerHTML = '<p class="project-area-empty">No project areas yet. Add one for your Proxy, games, or another project.</p>';
+    return;
+  }
+  root.innerHTML = state.projectAreas.map((area) => `<article class="project-area-item"><div class="project-area-icon">${area.kind === "games" ? svg("games", 16) : svg("external", 16)}</div><div class="project-area-copy"><strong>${escapeHtml(area.label)}</strong><span>${escapeHtml(area.kind)} · private to your account</span></div><div class="project-area-actions"><button class="text-button" type="button" data-edit-project-area="${area.id}">Rename</button><button class="text-button danger-text" type="button" data-delete-project-area="${area.id}">Remove</button></div></article>`).join("");
+  $$("[data-edit-project-area]", root).forEach((button) => button.addEventListener("click", () => {
+    const area = state.projectAreas.find((item) => item.id === button.dataset.editProjectArea);
+    if (area) openProjectAreaDialog(area);
+  }));
+  $$("[data-delete-project-area]", root).forEach((button) => button.addEventListener("click", () => void deleteProjectArea(button.dataset.deleteProjectArea)));
+}
+
+async function loadProjectAreas() {
+  try {
+    const result = await api("/api/project-areas");
+    state.projectAreas = result.items;
+    renderProjectAreas();
+  } catch (error) {
+    $("#project-area-list").innerHTML = `<p class="project-area-empty">${escapeHtml(error.message)}</p>`;
+  }
+}
+
+function openProjectAreaDialog(area = null) {
+  const name = area?.name ?? "Proxy";
+  openDialog({
+    title: area ? "Edit project area" : "Add project area",
+    subtitle: "Only you can view and manage areas belonging to your account.",
+    content: `<form id="project-area-form" class="settings-grid"><label class="form-field"><span class="field-label">Area type</span><select class="field-select" name="kind"><option value="proxy">Proxy</option><option value="games">Games</option><option value="custom">Custom project</option></select></label><label class="form-field"><span class="field-label">Project name</span><input class="field-input" name="name" maxlength="50" required value="${escapeHtml(name)}"></label></form>`,
+    footer: `<span class="muted" style="font-size:9px">Displayed as ${escapeHtml(state.account.label)}'s [project name].</span><div class="dialog-footer-right"><button class="secondary-button" data-close-dialog type="button">Cancel</button><button id="save-project-area" class="primary-button" type="button">Save area</button></div>`,
+  });
+  const form = $("#project-area-form");
+  form.elements.kind.value = area?.kind ?? "proxy";
+  form.elements.kind.addEventListener("change", () => {
+    if (!area || ["Proxy", "games"].includes(form.elements.name.value)) {
+      form.elements.name.value = form.elements.kind.value === "proxy" ? "Proxy" : form.elements.kind.value === "games" ? "games" : "";
     }
-    root.innerHTML = state.projectAreas.map((area) => `<article class="project-area-item"><div class="project-area-icon">${area.kind === "games" ? svg("games", 16) : svg("external", 16)}</div><div class="project-area-copy"><strong>${escapeHtml(area.label)}</strong><span>${escapeHtml(area.kind)} · private to your account</span></div><div class="project-area-actions"><button class="text-button" type="button" data-edit-project-area="${area.id}">Rename</button><button class="text-button danger-text" type="button" data-delete-project-area="${area.id}">Remove</button></div></article>`).join("");
-    $$("[data-edit-project-area]", root).forEach((button) => button.addEventListener("click", () => {
-      const area = state.projectAreas.find((item) => item.id === button.dataset.editProjectArea);
-      if (area) openProjectAreaDialog(area);
-    }));
-    $$("[data-delete-project-area]", root).forEach((button) => button.addEventListener("click", () => void deleteProjectArea(button.dataset.deleteProjectArea)));
-  }
-
-  async function loadProjectAreas() {
+  });
+  $("[data-close-dialog]").addEventListener("click", closeDialog);
+  $("#save-project-area").addEventListener("click", async () => {
+    if (!form.reportValidity()) return;
+    const body = { kind: form.elements.kind.value, name: form.elements.name.value.trim() };
     try {
-      const result = await api("/api/project-areas");
-      state.projectAreas = result.items;
-      renderProjectAreas();
-    } catch (error) {
-      $("#project-area-list").innerHTML = `<p class="project-area-empty">${escapeHtml(error.message)}</p>`;
-    }
-  }
-
-  function openProjectAreaDialog(area = null) {
-    const name = area?.name ?? "Proxy";
-    openDialog({
-      title: area ? "Edit project area" : "Add project area",
-      subtitle: "Only you can view and manage areas belonging to your account.",
-      content: `<form id="project-area-form" class="settings-grid"><label class="form-field"><span class="field-label">Area type</span><select class="field-select" name="kind"><option value="proxy">Proxy</option><option value="games">Games</option><option value="custom">Custom project</option></select></label><label class="form-field"><span class="field-label">Project name</span><input class="field-input" name="name" maxlength="50" required value="${escapeHtml(name)}"></label></form>`,
-      footer: `<span class="muted" style="font-size:9px">Displayed as ${escapeHtml(state.account.label)}'s [project name].</span><div class="dialog-footer-right"><button class="secondary-button" data-close-dialog type="button">Cancel</button><button id="save-project-area" class="primary-button" type="button">Save area</button></div>`,
-    });
-    const form = $("#project-area-form");
-    form.elements.kind.value = area?.kind ?? "proxy";
-    form.elements.kind.addEventListener("change", () => {
-      if (!area || ["Proxy", "games"].includes(form.elements.name.value)) {
-        form.elements.name.value = form.elements.kind.value === "proxy" ? "Proxy" : form.elements.kind.value === "games" ? "games" : "";
-      }
-    });
-    $("[data-close-dialog]").addEventListener("click", closeDialog);
-    $("#save-project-area").addEventListener("click", async () => {
-      if (!form.reportValidity()) return;
-      const body = { kind: form.elements.kind.value, name: form.elements.name.value.trim() };
-      try {
-        await api(area ? `/api/project-areas/${area.id}` : "/api/project-areas", {
-          method: area ? "PATCH" : "POST",
-          body,
-        });
-        closeDialog();
-        await loadProjectAreas();
-        toast(area ? "Project area updated." : "Project area created.");
-      } catch (error) { toast(error.message); }
-    });
-  }
-
-  async function deleteProjectArea(id) {
-    if (!confirm("Remove this private project area?")) return;
-    try {
-      await api(`/api/project-areas/${id}`, { method: "DELETE" });
+      await api(area ? `/api/project-areas/${area.id}` : "/api/project-areas", {
+        method: area ? "PATCH" : "POST",
+        body,
+      });
+      closeDialog();
       await loadProjectAreas();
-      toast("Project area removed.");
+      toast(area ? "Project area updated." : "Project area created.");
     } catch (error) { toast(error.message); }
-  }
+  });
+}
+
+async function deleteProjectArea(id) {
+  if (!confirm("Remove this private project area?")) return;
+  try {
+    await api(`/api/project-areas/${id}`, { method: "DELETE" });
+    await loadProjectAreas();
+    toast("Project area removed.");
+  } catch (error) { toast(error.message); }
 }
 
 async function refreshCapabilities() {
@@ -772,6 +972,8 @@ function closeDialog() {
   state.assistantAbort = null;
   clearInterval(state.gameTimer);
   state.gameTimer = 0;
+  clearInterval(state.social.refreshTimer);
+  state.social.refreshTimer = 0;
   if (root._onClose) root._onClose();
   root._onClose = null;
   root.replaceChildren();
@@ -780,6 +982,168 @@ function closeDialog() {
 
 function dialogEscape(event) {
   if (event.key === "Escape") closeDialog();
+}
+
+function renderSocialSidebar() {
+  const requests = $("#social-requests");
+  const friends = $("#social-friends");
+  if (!requests || !friends) return;
+  const { incoming, outgoing } = state.social;
+  requests.innerHTML = `${incoming.length ? `<h3>Incoming requests</h3>${incoming.map((item) => `<div class="social-row"><span>@${escapeHtml(item.username)}</span><div><button class="text-button" data-social-accept="${escapeHtml(item.id)}">Accept</button><button class="text-button" data-social-decline="${escapeHtml(item.id)}">Decline</button></div></div>`).join("")}` : ""}${outgoing.length ? `<h3>Sent requests</h3>${outgoing.map((item) => `<div class="social-row muted">@${escapeHtml(item.username)} <span>Pending</span></div>`).join("")}` : ""}`;
+  friends.innerHTML = state.social.friends.length
+    ? state.social.friends.map((friend) => `<div class="social-row${state.social.activeFriend?.id === friend.id ? " selected" : ""}"><button class="social-friend-button" data-social-friend="${escapeHtml(friend.id)}">@${escapeHtml(friend.username)}</button><button class="text-button" data-social-remove="${escapeHtml(friend.id)}" aria-label="Remove @${escapeHtml(friend.username)}">Remove</button></div>`).join("")
+    : `<p class="muted social-empty">No friends yet. Add someone by their username to start a conversation.</p>`;
+  for (const button of $$("[data-social-accept]", requests)) button.addEventListener("click", async () => {
+    try { await api(`/api/social/requests/${button.dataset.socialAccept}`, { method: "POST" }); await refreshSocial(); }
+    catch (error) { toast(error.message); }
+  });
+  for (const button of $$("[data-social-decline]", requests)) button.addEventListener("click", async () => {
+    try { await api(`/api/social/requests/${button.dataset.socialDecline}`, { method: "DELETE" }); await refreshSocial(); }
+    catch (error) { toast(error.message); }
+  });
+  for (const button of $$("[data-social-friend]", friends)) button.addEventListener("click", () => {
+    state.social.activeFriend = state.social.friends.find(({ id }) => id === button.dataset.socialFriend) ?? null;
+    state.social.messages = [];
+    renderSocialSidebar();
+    renderSocialConversation();
+    void refreshSocial();
+  });
+  for (const button of $$("[data-social-remove]", friends)) button.addEventListener("click", async () => {
+    try {
+      await api(`/api/social/friends/${button.dataset.socialRemove}`, { method: "DELETE" });
+      if (state.social.activeFriend?.id === button.dataset.socialRemove) state.social.activeFriend = null;
+      state.social.messages = [];
+      renderSocialSidebar();
+      renderSocialConversation();
+    } catch (error) { toast(error.message); }
+  });
+}
+
+function renderSocialConversation() {
+  const chat = $("#social-conversation");
+  if (!chat) return;
+  const friendId = state.social.activeFriend?.id ?? "";
+  if (chat.dataset.friendId === friendId) return;
+  chat.dataset.friendId = friendId;
+  if (!state.social.activeFriend) {
+    chat.innerHTML = `<div class="social-chat-empty"><span class="social-chat-icon">◌</span><strong>Your conversations</strong><p>Select an accepted friend to view or send messages.</p></div>`;
+    return;
+  }
+  chat.innerHTML = `<header class="social-chat-header"><strong>@${escapeHtml(state.social.activeFriend.username)}</strong><span>Private conversation</span></header><div id="social-message-list" class="social-message-list"></div><form id="social-message-form" class="social-composer"><textarea name="message" maxlength="2000" rows="2" placeholder="Write a message…" aria-label="Message" required></textarea><button class="primary-button" type="submit">Send</button></form>`;
+  $("#social-message-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const field = $("textarea", form);
+    const message = field.value.trim();
+    if (!message) return;
+    const button = $("button", form);
+    button.disabled = true;
+    try {
+      await api(`/api/social/friends/${state.social.activeFriend.id}/messages`, { method: "POST", body: { message } });
+      field.value = "";
+      await refreshSocial();
+    } catch (error) { toast(error.message); }
+    finally { button.disabled = false; }
+  });
+}
+
+function renderSocialMessages(messages) {
+  const list = $("#social-message-list");
+  if (!list) return;
+  const fingerprint = messages.map(({ id }) => id).join(",");
+  if (list.dataset.fingerprint === fingerprint) return;
+  list.dataset.fingerprint = fingerprint;
+  list.innerHTML = messages.length
+    ? messages.map((message) => `<article class="chat-message${message.senderId === state.account.id ? " user" : " assistant"}"><p>${escapeHtml(message.body)}</p><time>${escapeHtml(fmtDate(message.createdAt))}</time></article>`).join("")
+    : `<p class="muted social-empty">No messages yet. Say hello.</p>`;
+  list.scrollTop = list.scrollHeight;
+}
+
+async function refreshSocial() {
+  try {
+    const result = await api("/api/social");
+    state.social.friends = result.friends;
+    state.social.incoming = result.incoming;
+    state.social.outgoing = result.outgoing;
+    if (state.social.activeFriend) {
+      state.social.activeFriend = state.social.friends.find(({ id }) => id === state.social.activeFriend.id) ?? null;
+    }
+    renderSocialSidebar();
+    if (state.social.activeFriend) {
+      const result = await api(`/api/social/friends/${state.social.activeFriend.id}/messages`);
+      state.social.messages = result.messages;
+    } else {
+      state.social.messages = [];
+    }
+    renderSocialConversation();
+    renderSocialMessages(state.social.messages);
+  } catch (error) {
+    if ($("#social-requests")) toast(error.message);
+  }
+}
+
+function openSocial() {
+  if (!state.account) return;
+  state.social.activeFriend = null;
+  state.social.messages = [];
+  openDialog({
+    title: "Friends & chat",
+    subtitle: "Usernames are unique. Messages are only available between accepted friends.",
+    wide: true,
+    content: `<div class="social-layout"><aside class="social-sidebar"><form id="social-add-form" class="social-add-form"><label for="social-username">Add by username</label><div><input id="social-username" name="username" minlength="3" maxlength="24" pattern="[A-Za-z0-9_]{3,24}" placeholder="Username" required><button class="primary-button" type="submit">Add</button></div></form><section id="social-requests" class="social-list"></section><section id="social-friends" class="social-list"></section></aside><section id="social-conversation" class="social-chat"></section></div>`,
+  });
+  $("#social-add-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const input = $('input[name="username"]', form);
+    const button = $("button", form);
+    button.disabled = true;
+    try {
+      await api("/api/social/requests", { method: "POST", body: { username: input.value.trim() } });
+      input.value = "";
+      toast("Friend request sent.");
+      await refreshSocial();
+    } catch (error) { toast(error.message); }
+    finally { button.disabled = false; }
+  });
+  renderSocialConversation();
+  void refreshSocial();
+  state.social.refreshTimer = setInterval(() => {
+    if (!$("#social-conversation")) {
+      clearInterval(state.social.refreshTimer);
+      state.social.refreshTimer = 0;
+      return;
+    }
+    void refreshSocial();
+  }, 5000);
+}
+
+function openUsernameClaim() {
+  if (!state.account || state.account.username) return;
+  openDialog({
+    title: "Choose your username",
+    subtitle: "Usernames are unique, case-insensitive, and cannot be changed later.",
+    content: `<form id="username-claim-form" class="stack-form"><label for="username-claim-input">Username</label><input id="username-claim-input" name="username" type="text" autocomplete="username" minlength="3" maxlength="24" pattern="[A-Za-z0-9_]{3,24}" placeholder="3–24 letters, numbers, or underscores" required><p class="muted social-empty">This username identifies you in Friends &amp; chat.</p><button class="primary-button full-button" type="submit">Save username</button></form>`,
+  });
+  $("#username-claim-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const input = $('input[name="username"]', form);
+    const button = $("button", form);
+    button.disabled = true;
+    try {
+      const result = await api("/api/account/username", { method: "POST", body: { username: input.value.trim() } });
+      state.account.username = result.username;
+      $("#account-label").textContent = result.username;
+      $(".avatar").textContent = result.username.slice(0, 1).toUpperCase();
+      closeDialog();
+      toast(`Username saved as @${result.username}.`);
+    } catch (error) {
+      toast(error.message);
+    } finally {
+      button.disabled = false;
+    }
+  });
 }
 
 function fmtDate(value) {
@@ -981,12 +1345,14 @@ async function sendAssistantMessage(prompt) {
   state.assistantConversation.push(answer);
   renderAssistantMessages();
   try {
-    const response = await fetch("/api/ai/chat", {
+    const headers = { "Content-Type": "application/json", Accept: "text/event-stream", "X-NJ-CSRF": state.csrf };
+    if (API_MODE && state.apiToken) headers.Authorization = `Bearer ${state.apiToken}`;
+    const response = await fetch(new URL("/api/ai/chat", API_ORIGIN), {
       method: "POST",
-      credentials: "same-origin",
+      credentials: API_MODE ? "omit" : "same-origin",
       cache: "no-store",
       signal: abort.signal,
-      headers: { "Content-Type": "application/json", Accept: "text/event-stream", "X-NJ-CSRF": state.csrf },
+      headers,
       body: JSON.stringify({ messages: [...context, { role: "user", content: prompt }] }),
     });
     if (!response.ok || !response.body) {
@@ -1155,7 +1521,7 @@ function openHelp() {
     <section class="help-card help-shortcuts"><span class="help-card-kicker">KEYBOARD SHORTCUTS</span><h3>Move around faster</h3><div class="help-shortcut-list">${shortcuts.map(([label, keys]) => `<div class="help-shortcut"><span>${escapeHtml(label)}</span><kbd>${escapeHtml(keys)}</kbd></div>`).join("")}</div></section>
     <section class="help-card"><span class="help-card-kicker">PRIVACY & LIMITS</span><h3>What this browser can do</h3><p>Websites open through Nightjar's separate-origin Rammerhead browsing engine. Destinations are limited to public HTTP(S) sites on ports 80 and 443. Some sites may still be incompatible; use <strong>Open in a regular tab</strong> when needed.</p><p>Downloads belong to the host browser. This web app does not control your device or regular browser. Desktop sharing or input requires a separately installed companion and local approval; an owner password alone cannot activate it.</p></section>
     <section class="help-card"><span class="help-card-kicker">LOCAL AI</span><h3>Ask the on-device assistant</h3><p>The assistant uses your local Ollama model and can be opened from the toolbar. Its chat is not saved, and it cannot read your open pages, files, or credentials. If unavailable, check Ollama and the model status in Settings or ask the workspace owner.</p></section>
-    <section class="help-card"><span class="help-card-kicker">GAME LOUNGE</span><h3>Pick a game and play</h3><p>Open the toolbar's Game lounge to explore GN Math in a fresh Nightjar tab or play the built-in Quick Math sprint. The sprint's best score stays in this browser profile.</p></section>
+    <section class="help-card"><span class="help-card-kicker">GAMES</span><h3>Pick a game and play</h3><p>Open Games to browse the live catalog. Selected games are fetched directly and run in an isolated player without Rammerhead. Quick Math is also available; its best score stays in this browser profile.</p></section>
     <section class="help-card help-contact"><span class="help-card-kicker">SUPPORT & IDEAS</span><h3>Help us make Nightjar better</h3><p>Send a private support request or feature suggestion to the owner. It is stored in this workspace for owner review and is not sent to an external service.</p>${canSendFeedback ? '<div class="fallback-actions"><button id="help-support" class="secondary-button" type="button">Contact support</button><button id="help-suggest" class="primary-button" type="button">Share an idea</button></div>' : '<p class="muted">Support requests are not enabled for this account. Ask the owner for access.</p>'}</section>
     <section class="help-card"><span class="help-card-kicker">INVITATION PRIVACY</span><h3>One-time sign-in</h3><p>An invitation is redeemed once. After that, the browser uses a server-validated, HttpOnly cookie session, so refreshing does not need the invitation again. A token remains a bearer credential until first redemption—keep it private and share it only with its intended person.</p></section>
   </div>`;
@@ -1219,36 +1585,165 @@ function newMathQuestion() {
   return { prompt: `${left} ${operation} ${right}`, answer };
 }
 
-function openMathGame() {
+function openGames() {
   if (!state.account?.permissions.includes("games") || !state.account.features.includes("games")) {
-    toast("Math games are not enabled for this account.");
+    toast("Games are not enabled for this account.");
     return;
   }
-  const content = `<section class="game-lounge" aria-label="Game lounge">
-    <article class="game-launch-card game-launch-featured">
-      <div class="game-art game-art-portal" aria-hidden="true"><span class="game-art-orbit"></span><span class="game-art-glyph">G</span><span class="game-art-spark">✦</span></div>
-      <div class="game-launch-copy"><span class="game-launch-kicker">THE GAME LIBRARY</span><h3>Find your next favorite.</h3><p>Explore GN Math’s collection of quick browser games, opened in a fresh Nightjar tab through the private browsing surface.</p><button id="open-gn-math" class="primary-button" type="button">Explore GN Math <span aria-hidden="true">↗</span></button></div>
-    </article>
-    <article class="game-launch-card game-launch-quick">
-      <div class="game-art game-art-quick" aria-hidden="true"><span>+</span><span>×</span><span>÷</span></div>
-      <div class="game-launch-copy"><span class="game-launch-kicker">NIGHTJAR ORIGINAL</span><h3>Quick Math</h3><p>A focused 60-second arithmetic sprint. Your best score stays in this browser profile.</p><button id="open-quick-math" class="secondary-button" type="button">Start a round <span aria-hidden="true">→</span></button></div>
-    </article>
-    <p class="game-lounge-note"><span class="status-dot"></span> External games run as web content and may depend on the site being available.</p>
-  </section>`;
-  openDialog({
-    title: "Game lounge",
-    subtitle: "A little play, right from your workspace.",
-    content,
-    wide: true,
-    footer: '<span class="muted help-footer-note">Games are available to this account</span><div class="dialog-footer-right"><button id="game-lounge-done" class="secondary-button" type="button">Close</button></div>',
-  });
-  $("#open-gn-math").addEventListener("click", () => {
-    closeDialog();
-    const tab = createTab(true);
-    void navigate("https://gn-math.dev", { tab });
-  });
-  $("#open-quick-math").addEventListener("click", openQuickMathGame);
-  $("#game-lounge-done").addEventListener("click", closeDialog);
+  createTab(true, "nightjar://games");
+}
+
+function isHttpsGameUrl(value) {
+  if (typeof value !== "string") return null;
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" && !url.username && !url.password ? url.href : null;
+  } catch {
+    return null;
+  }
+}
+
+async function loadGamesCatalog() {
+  state.gamesFetchAbort?.abort();
+  const fetchAbortController = new AbortController();
+  state.gamesFetchAbort = fetchAbortController;
+  $("#games-status").textContent = "Loading the game list…";
+  $("#games-grid").replaceChildren();
+  try {
+    const linksResponse = await fetch(GAMES_LINKS_URL, { signal: fetchAbortController.signal });
+    if (!linksResponse.ok) throw new Error(`The game list service returned HTTP ${linksResponse.status}.`);
+    const linkValue = (await linksResponse.text()).trim();
+    const linkAddress = linkValue.startsWith('"') ? JSON.parse(linkValue) : linkValue;
+    const targetUrl = isHttpsGameUrl(linkAddress);
+    if (!targetUrl) throw new Error("The game list service did not return a valid HTTPS catalog URL.");
+
+    const response = await fetch(targetUrl, { signal: fetchAbortController.signal });
+    if (!response.ok) throw new Error(`The game catalog returned HTTP ${response.status}.`);
+    const catalog = await response.json();
+    if (!catalog || !Array.isArray(catalog.games)) throw new Error("The game catalog has an unsupported format.");
+    if (state.gamesFetchAbort !== fetchAbortController) return;
+    state.games = catalog.games
+      .filter((game) => game && (typeof game.id === "number" || typeof game.id === "string"))
+      .map((game) => ({ id: String(game.id), cover: isHttpsGameUrl(game.cover), url: isHttpsGameUrl(game.url) }))
+      .filter((game) => game.cover && game.url);
+    state.gamesVisibleCount = GAMES_PAGE_SIZE;
+    renderGamesCatalog();
+    const gameRoute = nightjarGameRoute(activeTab()?.url ?? "");
+    if (gameRoute?.gameId !== null && gameRoute?.gameId !== undefined) launchGameRoute(gameRoute.gameId);
+  } catch (error) {
+    if (error.name === "AbortError") return;
+    $("#games-status").textContent = `Could not load games: ${error.message}`;
+    $("#games-grid").replaceChildren();
+    $("#games-load-more").hidden = true;
+    toast(error.message);
+  } finally {
+    if (state.gamesFetchAbort === fetchAbortController) state.gamesFetchAbort = null;
+  }
+}
+
+function renderGamesCatalog() {
+  const games = state.games ?? [];
+  const query = $("#games-search").value.trim().toLowerCase();
+  const filtered = games
+    .map((game, index) => ({ game, index }))
+    .filter(({ game }) => `game ${game.id}`.toLowerCase().includes(query));
+  const visible = filtered.slice(0, state.gamesVisibleCount);
+  const grid = $("#games-grid");
+  grid.replaceChildren();
+  for (const { game, index } of visible) {
+    const card = document.createElement("button");
+    card.type = "button";
+    card.className = "game-catalog-card";
+    card.dataset.gameIndex = String(index);
+    const cover = document.createElement("img");
+    cover.src = game.cover;
+    cover.alt = "";
+    cover.loading = "lazy";
+    cover.referrerPolicy = "no-referrer";
+    const label = document.createElement("span");
+    label.textContent = `Game ${game.id}`;
+    card.append(cover, label);
+    grid.append(card);
+  }
+  $("#games-status").textContent = games.length
+    ? `Showing ${visible.length} of ${filtered.length} matching games · ${games.length} total`
+    : "No games are available right now.";
+  $("#games-load-more").hidden = visible.length >= filtered.length;
+}
+
+function closeGamePlayer() {
+  state.gameFetchAbort?.abort();
+  state.gameFetchAbort = null;
+  state.activeGame = null;
+  const player = $("#game-player");
+  if (!player) return;
+  player.hidden = true;
+  $("#game-frame").src = "about:blank";
+}
+
+async function playGame(game) {
+  closeGamePlayer();
+  state.activeGame = game;
+  const fetchAbortController = new AbortController();
+  state.gameFetchAbort = fetchAbortController;
+  const player = $("#game-player");
+  const frame = $("#game-frame");
+  $("#game-player-title").textContent = `Game ${game.id}`;
+  player.hidden = false;
+  $("#games-status").textContent = `Loading Game ${game.id} directly…`;
+  try {
+    if (!state.gameOrigin) {
+      const config = await api("/api/browser/config");
+      if (!/^https?:\/\/[^/]+$/.test(config.gameOrigin)) throw new Error("The isolated game runtime returned an invalid origin.");
+      state.gameOrigin = config.gameOrigin;
+    }
+    if (state.gameFetchAbort !== fetchAbortController) return;
+    const targetUrl = isHttpsGameUrl(game.url);
+    if (!targetUrl) throw new Error("This game has an invalid HTTPS address.");
+    const response = await fetch(targetUrl, { signal: fetchAbortController.signal });
+    if (!response.ok) throw new Error(`The game returned HTTP ${response.status}.`);
+    let html = await response.text();
+    if (state.gameFetchAbort !== fetchAbortController) return;
+    frame.addEventListener("load", () => {
+      if (state.gameFetchAbort !== fetchAbortController || !frame.contentWindow) return;
+      frame.contentWindow.postMessage({ source: "nightjar-game-content", targetUrl, html }, "*");
+      const message = `Playing Game ${game.id} · loaded directly without the proxy`;
+      $("#games-status").textContent = message;
+      setStatus(message);
+    }, { once: true });
+    const playerUrl = new URL("/games-player.html", state.gameOrigin);
+    playerUrl.searchParams.set("appOrigin", location.origin);
+    playerUrl.searchParams.set("run", crypto.randomUUID());
+    frame.src = playerUrl.href;
+  } catch (error) {
+    if (state.gameFetchAbort !== fetchAbortController) return;
+    state.gameFetchAbort = null;
+    if (error.name === "AbortError") return;
+    $("#game-player-title").textContent = `Could not load Game ${game.id}: ${error.message}`;
+    setStatus(`Could not load Game ${game.id}`);
+    toast(error.message);
+  }
+}
+
+function launchGameRoute(gameId) {
+  const game = state.games?.find((item) => item.id === gameId);
+  if (!game) {
+    $("#game-player-title").textContent = `Game ${gameId} is not in the current catalog.`;
+    $("#games-status").textContent = `Could not find Game ${gameId}.`;
+    $("#game-player").hidden = false;
+    return;
+  }
+  void playGame(game);
+}
+
+function loadGameById(gameId) {
+  $("#game-player").hidden = false;
+  $("#game-player-title").textContent = `Loading Game ${gameId}…`;
+  if (state.games === null) {
+    void loadGamesCatalog();
+    return;
+  }
+  launchGameRoute(gameId);
 }
 
 function openQuickMathGame() {
@@ -1410,14 +1905,20 @@ async function signOut(callServer = true) {
     }
   }
   if (clear && state.account) localStorage.removeItem(getStorageKey("tabs"));
+  state.gamesFetchAbort?.abort();
+  closeGamePlayer();
+  $("#games-surface").hidden = true;
   if (state.proxyReady) postProxy({ type: "nightjar:shutdown" });
   state.proxyReady = false;
   state.proxySessionId = "";
   state.proxyOrigin = "";
+  state.gameOrigin = "";
   $("#page-frame").src = "about:blank";
   closeDialog();
   state.account = null;
   state.csrf = "";
+  if (API_MODE) localStorage.removeItem(API_SESSION_KEY);
+  state.apiToken = "";
   state.settings = { ...defaults, privacy: { ...defaults.privacy }, toolbarOrder: [...defaults.toolbarOrder] };
   state.tabs = [];
   state.activeId = null;
@@ -1464,12 +1965,22 @@ $("#signin-form").addEventListener("submit", async (event) => {
   button.disabled = true;
   const token = $("#invite-token").value.trim();
   try {
-    const result = await api("/api/auth/login", { method: "POST", body: { token } });
+    const username = $("#invite-username").value.trim();
+    const result = await api("/api/auth/login", { method: "POST", body: { token, username, apiMode: API_MODE } });
+    if (API_MODE) {
+      if (typeof result.sessionToken !== "string") throw new Error("The API did not return a bearer session.");
+      state.apiToken = result.sessionToken;
+      localStorage.setItem(API_SESSION_KEY, result.sessionToken);
+    }
     state.csrf = result.csrf;
     applyDisplay(result);
   } catch (failure) {
     error.textContent = failure.message;
     error.hidden = false;
+    if (failure.code === "username_required") {
+      $("#invite-username").focus();
+      $("#invite-username").placeholder = "Required once for your account";
+    }
   } finally {
     button.disabled = false;
   }
@@ -1500,13 +2011,39 @@ $("#assistant-open").addEventListener("click", openAssistant);
 $("#settings-open").addEventListener("click", openSettings);
 $("#theme-toggle").addEventListener("click", () => void cycleTheme());
 $("#help-open").addEventListener("click", openHelp);
-$("#games-open").addEventListener("click", openMathGame);
+$("#games-open").addEventListener("click", openGames);
+$("#home-games").addEventListener("click", openGames);
+$("#home-social").addEventListener("click", openSocial);
+$("#games-home").addEventListener("click", showHome);
+$("#quick-math-launch").addEventListener("click", openQuickMathGame);
+$("#games-search").addEventListener("input", () => {
+  state.gamesVisibleCount = GAMES_PAGE_SIZE;
+  renderGamesCatalog();
+});
+$("#games-load-more").addEventListener("click", () => {
+  state.gamesVisibleCount += GAMES_PAGE_SIZE;
+  renderGamesCatalog();
+});
+$("#games-grid").addEventListener("click", (event) => {
+  const card = event.target.closest("[data-game-index]");
+  if (!card) return;
+  const game = state.games?.[Number(card.dataset.gameIndex)];
+  if (game) createTab(true, `nightjar://games/${encodeURIComponent(game.id)}`);
+});
+$("#game-player-back").addEventListener("click", () => void navigate("nightjar://games"));
+$("#game-player-reload").addEventListener("click", () => {
+  if (state.activeGame) void playGame(state.activeGame);
+});
 $("#project-area-create").addEventListener("click", () => openProjectAreaDialog());
 $("#signout").addEventListener("click", () => {
   if (confirm("Sign out of this private workspace?")) void signOut(true);
 });
 $("#account-chip").addEventListener("click", () => {
-  toast(`Signed in as ${state.account.label}. This account has one active browser session.`, 3800);
+  if (!state.account.username) {
+    openUsernameClaim();
+    return;
+  }
+  toast(`Signed in as @${state.account.username || state.account.label}. This account can have multiple active sessions.`, 3800);
 });
 $("#address-form").addEventListener("submit", (event) => {
   event.preventDefault();
@@ -1521,6 +2058,7 @@ function openRegularTab() {
   if (!url) return;
   window.open(url, "_blank", "noopener,noreferrer");
 }
+$("#youtube-open-original").addEventListener("click", openRegularTab);
 $("#open-external").addEventListener("click", openRegularTab);
 $("#open-regular").addEventListener("click", openRegularTab);
 $("#retry-page").addEventListener("click", reloadPage);

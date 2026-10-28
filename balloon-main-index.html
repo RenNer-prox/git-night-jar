@@ -1,0 +1,1336 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Balloon Games</title>
+
+  <!-- Favicon strictly in the browser address/tab bar -->
+  <link rel="icon" type="image/png" href="https://bearstool.com/icon.png">
+  <link rel="shortcut icon" href="https://bearstool.com/icon.png">
+
+  <style>
+    /* -------------------------------------------------------------
+       STRICT BLACK & WHITE DESIGN SYSTEM
+       ------------------------------------------------------------- */
+    :root {
+      --bg: #000000;
+      --surface: #0a0a0a;
+      --surface-elevated: #141414;
+      --border: #262626;
+      --border-focus: #ffffff;
+      --text-main: #ffffff;
+      --text-muted: #888888;
+      --font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      background-color: var(--bg);
+      color: var(--text-main);
+      font-family: var(--font-family);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      overflow-x: hidden;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    a:focus-visible, button:focus-visible, input:focus-visible, textarea:focus-visible, summary:focus-visible {
+      outline: 2px solid var(--border-focus);
+      outline-offset: 2px;
+    }
+
+    /* -------------------------------------------------------------
+       HEADER
+       ------------------------------------------------------------- */
+    header {
+      border-bottom: 1px solid var(--border);
+      position: sticky;
+      top: 0;
+      background: rgba(0, 0, 0, 0.95);
+      backdrop-filter: blur(8px);
+      z-index: 50;
+    }
+
+    .header-content {
+      max-width: 1400px;
+      margin: 0 auto;
+      padding: 16px 24px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      flex-wrap: wrap;
+    }
+
+    .brand {
+      text-decoration: none;
+      color: var(--text-main);
+    }
+
+    .brand h1 {
+      font-size: 1.15rem;
+      font-weight: 800;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+    }
+
+    .controls-bar {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      flex: 1;
+      max-width: 320px;
+      justify-content: flex-end;
+    }
+
+    .search-wrapper {
+      position: relative;
+      width: 100%;
+    }
+
+    .input-field {
+      width: 100%;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      color: var(--text-main);
+      padding: 8px 12px;
+      font-size: 0.85rem;
+      border-radius: 4px;
+      transition: border-color 0.15s ease;
+      font-family: inherit;
+    }
+
+    .input-field:focus {
+      border-color: var(--border-focus);
+    }
+
+    .btn {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      color: var(--text-main);
+      padding: 6px 12px;
+      font-size: 0.8rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      border-radius: 4px;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      white-space: nowrap;
+      transition: all 0.15s ease;
+      font-family: inherit;
+    }
+
+    .btn:hover {
+      background: var(--text-main);
+      color: var(--bg);
+      border-color: var(--text-main);
+    }
+
+    .btn-primary {
+      background: var(--text-main);
+      color: var(--bg);
+      border-color: var(--text-main);
+    }
+
+    .btn-primary:hover {
+      background: transparent;
+      color: var(--text-main);
+    }
+
+    /* -------------------------------------------------------------
+       MAIN CONTENT & SQUARE GAME GRID
+       ------------------------------------------------------------- */
+    main {
+      flex: 1;
+      max-width: 1400px;
+      width: 100%;
+      margin: 0 auto;
+      padding: 32px 24px;
+    }
+
+    .status-container {
+      text-align: center;
+      padding: 60px 20px;
+      color: var(--text-muted);
+    }
+
+    .status-container.hidden {
+      display: none;
+    }
+
+    .spinner {
+      width: 32px;
+      height: 32px;
+      border: 2px solid var(--border);
+      border-top-color: var(--text-main);
+      border-radius: 50%;
+      animation: spin 0.7s linear infinite;
+      margin: 0 auto 16px;
+    }
+
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+
+    .error-box {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 24px;
+      max-width: 600px;
+      margin: 40px auto;
+      text-align: left;
+    }
+
+    .error-title {
+      font-size: 1.05rem;
+      font-weight: 700;
+      letter-spacing: 0.02em;
+      margin-bottom: 12px;
+    }
+
+    .error-details {
+      margin-top: 14px;
+      border-top: 1px solid var(--border);
+      padding-top: 14px;
+    }
+
+    .error-details summary {
+      cursor: pointer;
+      font-size: 0.85rem;
+      font-weight: 600;
+      color: var(--text-muted);
+      user-select: none;
+      transition: color 0.15s ease;
+    }
+
+    .error-details summary:hover {
+      color: var(--text-main);
+    }
+
+    .technical-log {
+      margin-top: 10px;
+      padding: 12px;
+      background: #000000;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      font-family: monospace;
+      font-size: 0.75rem;
+      color: #cccccc;
+      white-space: pre-wrap;
+      word-break: break-all;
+      max-height: 200px;
+      overflow-y: auto;
+    }
+
+    .game-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+      gap: 24px;
+    }
+
+    .game-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      overflow: hidden;
+      cursor: pointer;
+      display: flex;
+      flex-direction: column;
+      transition: transform 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
+      position: relative;
+    }
+
+    .game-card:hover {
+      transform: translateY(-4px);
+      border-color: var(--text-main);
+      box-shadow: 0 10px 25px rgba(255, 255, 255, 0.05);
+    }
+
+    .cover-container {
+      width: 100%;
+      aspect-ratio: 1 / 1;
+      background: #111;
+      overflow: hidden;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      position: relative;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .cover-image {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      display: block;
+      transition: transform 0.3s ease;
+    }
+
+    .game-card:hover .cover-image {
+      transform: scale(1.04);
+    }
+
+    .image-placeholder {
+      font-size: 0.75rem;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+
+    .card-meta {
+      padding: 12px 14px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .game-id {
+      font-size: 0.85rem;
+      font-weight: 700;
+      letter-spacing: 0.05em;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      flex: 1;
+    }
+
+    .play-badge {
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      font-weight: 600;
+      letter-spacing: 0.05em;
+      border: 1px solid var(--border);
+      padding: 4px 10px;
+      border-radius: 3px;
+      background: transparent;
+      color: var(--text-main);
+      cursor: pointer;
+      font-family: inherit;
+    }
+
+    .play-badge:hover, .game-card:hover .play-badge {
+      background: var(--text-main);
+      color: var(--bg);
+      border-color: var(--text-main);
+    }
+
+    .scroll-sentinel {
+      width: 100%;
+      height: 40px;
+      grid-column: 1 / -1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    /* -------------------------------------------------------------
+       FOOTER
+       ------------------------------------------------------------- */
+    footer {
+      border-top: 1px solid var(--border);
+      padding: 24px;
+      background: var(--surface);
+    }
+
+    .footer-content {
+      max-width: 1400px;
+      margin: 0 auto;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 16px;
+      font-size: 0.9rem;
+      color: var(--text-muted);
+    }
+
+    .footer-left {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .source-link-bottom {
+      color: var(--text-muted);
+      text-decoration: underline;
+      font-size: 0.85rem;
+      transition: color 0.15s ease;
+    }
+
+    .source-link-bottom:hover {
+      color: var(--text-main);
+    }
+
+    .total-count {
+      color: var(--text-main);
+      font-weight: 700;
+      letter-spacing: 0.04em;
+    }
+
+    /* -------------------------------------------------------------
+       FULLSCREEN RESTRICTION MODAL
+       ------------------------------------------------------------- */
+    .auth-fullscreen {
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.98);
+      backdrop-filter: blur(12px);
+      z-index: 100000;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+    }
+
+    .auth-fullscreen.hidden {
+      display: none;
+    }
+
+    .auth-dialog {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      max-width: 580px;
+      width: 100%;
+      padding: 32px 28px;
+      box-shadow: 0 20px 50px rgba(0, 0, 0, 0.9);
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+
+    .auth-title {
+      font-size: 1.25rem;
+      font-weight: 800;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 12px;
+      color: var(--text-main);
+    }
+
+    .auth-body {
+      font-size: 0.9rem;
+      line-height: 1.6;
+      color: #cccccc;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .auth-error {
+      background: rgba(255, 60, 60, 0.1);
+      border: 1px solid #ff4444;
+      color: #ff6b6b;
+      padding: 10px 14px;
+      border-radius: 4px;
+      font-size: 0.85rem;
+      font-weight: 600;
+    }
+
+    .auth-input-container {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      margin-top: 6px;
+    }
+
+    .auth-label {
+      font-size: 0.8rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--text-muted);
+    }
+
+    .btn-block {
+      width: 100%;
+      justify-content: center;
+      padding: 10px 16px;
+      font-size: 0.85rem;
+    }
+
+    /* -------------------------------------------------------------
+       LOADING OVERLAY DIALOG (While fetching via CORS)
+       ------------------------------------------------------------- */
+    #game-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.92);
+      backdrop-filter: blur(8px);
+      z-index: 9999;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+    }
+
+    #game-overlay.hidden {
+      display: none;
+    }
+
+    .loading-dialog {
+      text-align: center;
+      max-width: 400px;
+      padding: 30px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+    }
+
+    .loading-dialog h3 {
+      font-size: 1.1rem;
+      margin-bottom: 16px;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+    }
+
+    .loading-dialog p {
+      color: var(--text-muted);
+      font-size: 0.85rem;
+      margin-top: 12px;
+    }
+
+    @media (max-width: 768px) {
+      .header-content {
+        flex-direction: column;
+        align-items: stretch;
+      }
+      .controls-bar {
+        max-width: 100%;
+      }
+      .search-wrapper {
+        max-width: 100%;
+      }
+      .game-grid {
+        grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+        gap: 16px;
+      }
+    }
+  </style>
+</head>
+<body>
+
+  <!-- HEADER -->
+  <header>
+    <div class="header-content">
+      <a href="#" class="brand">
+        <h1>Balloon Games</h1>
+      </a>
+
+      <div class="controls-bar">
+        <div class="search-wrapper">
+          <input
+            type="search"
+            id="search-input"
+            class="input-field"
+            placeholder="Search by ID."
+            aria-label="Search games"
+          >
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <!-- MAIN CATALOG VIEW -->
+  <main>
+    <div id="status-container" class="status-container">
+      <div class="spinner"></div>
+    </div>
+
+    <!-- Error message & Details container -->
+    <div id="error-container" class="error-box" style="display: none;">
+      <h2 class="error-title">Error! The games failed to load.</h2>
+      <details class="error-details">
+        <summary>View Details</summary>
+        <pre id="technical-details-log" class="technical-log"></pre>
+      </details>
+    </div>
+
+    <div id="game-grid" class="game-grid" role="region" aria-label="Game Grid"></div>
+  </main>
+
+  <!-- FOOTER -->
+  <footer>
+    <div class="footer-content">
+      <div class="footer-left">
+        <span>Balloon Games &bull; Powered by api.bearstool.com &bull; Beta! Bugs expected.</span>
+        <span>&bull;</span>
+        <a
+          id="games-source-link"
+          class="source-link-bottom"
+          href="#"
+          target="_blank"
+          rel="noopener noreferrer"
+          style="display: none;"
+        >Source URL</a>
+        <span>&bull;</span>
+        <button id="btn-open-bug-report" class="btn" style="padding: 2px 8px; font-size: 0.75rem;" type="button">Report Bug</button>
+      </div>
+      <div id="total-games" class="total-count">Total Games: 0</div>
+    </div>
+  </footer>
+
+  <!-- FULLSCREEN RESTRICTION POPUP -->
+  <section id="balloon-auth-modal" class="auth-fullscreen hidden" role="dialog" aria-modal="true" aria-label="Token Access Required">
+    <div class="auth-dialog">
+      <h2 class="auth-title">Welcome to Balloon Games!</h2>
+
+      <div class="auth-body">
+        <p>This seems to be your first time here. The site is restricted behind tokens. Please request a token with the site owner.</p>
+        <p>By using Balloon Games you consent to your time usage being recorded.</p>
+        <p>If you are not new and are seeing this, Request a token renewal with the owner.</p>
+        <p>This site is private, If you give out your token you will be forbidden from using this site.</p>
+      </div>
+
+      <div id="auth-error-box" class="auth-error" style="display: none;"></div>
+
+      <div class="auth-input-container">
+        <label for="auth-token-input" class="auth-label">Enter Token</label>
+        <input
+          type="text"
+          id="auth-token-input"
+          class="input-field"
+          placeholder="Paste access token here..."
+          autocomplete="off"
+          spellcheck="false"
+        >
+      </div>
+
+      <div>
+        <button id="btn-agree-token" class="btn btn-primary btn-block" type="button">Agree</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- BUG REPORT MODAL -->
+  <section id="bug-report-modal" class="auth-fullscreen hidden" role="dialog" aria-modal="true" aria-label="Submit Bug Report">
+    <div class="auth-dialog" style="max-width: 480px;">
+      <h2 class="auth-title">Report a Bug</h2>
+      <p style="font-size: 0.85rem; color: var(--text-muted);">Describe the issue you encountered.</p>
+
+      <div id="bug-report-msg" class="auth-error" style="display: none;"></div>
+
+      <textarea
+        id="bug-report-text"
+        class="input-field"
+        rows="4"
+        placeholder="Type bug details here..."
+        style="resize: vertical;"
+      ></textarea>
+
+      <div style="display: flex; justify-content: flex-end; gap: 10px;">
+        <button id="btn-close-bug-report" class="btn" type="button">Cancel</button>
+        <button id="btn-submit-bug-report" class="btn btn-primary" type="button">Send Report</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- FETCHING FEEDBACK OVERLAY -->
+  <section id="game-overlay" class="hidden" role="dialog" aria-modal="true" aria-label="Loading Game">
+    <div class="loading-dialog">
+      <div class="spinner"></div>
+      <h3 id="active-game-title">Launching Game</h3>
+      <p id="overlay-status-text">Fetching game HTML via CORS...</p>
+      <div style="margin-top: 20px;">
+        <button id="btn-cancel-launch" class="btn" type="button">Cancel</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- JAVASCRIPT ENGINE -->
+  <script>
+    (() => {
+      const BATCH_SIZE = 40;
+      const API_HOST = 'https://api.bearstool.com';
+      const API_BIN_BASE = `${API_HOST}/files/content/bin/`;
+
+      let allGames = [];
+      let activeGamesList = [];
+      let renderedCount = 0;
+      let scrollObserver = null;
+      let sentinelElem = null;
+      let currentCatalogUrl = '';
+      let fetchAbortController = null;
+      let heartbeatInterval = null;
+      let catalogLoaded = false;
+
+      // Handle browser back button to restore catalog
+      window.addEventListener('popstate', () => {
+        window.location.reload();
+      });
+
+      // DOM References
+      const sourceLink = document.getElementById('games-source-link');
+      const grid = document.getElementById('game-grid');
+      const searchInput = document.getElementById('search-input');
+      const totalGamesElem = document.getElementById('total-games');
+      const statusContainer = document.getElementById('status-container');
+      const errorContainer = document.getElementById('error-container');
+      const technicalDetailsLog = document.getElementById('technical-details-log');
+
+      // Overlay References
+      const gameOverlay = document.getElementById('game-overlay');
+      const overlayStatusText = document.getElementById('overlay-status-text');
+      const activeGameTitle = document.getElementById('active-game-title');
+      const btnCancelLaunch = document.getElementById('btn-cancel-launch');
+
+      // Balloon Auth & Bug Report References
+      const authModal = document.getElementById('balloon-auth-modal');
+      const authTokenInput = document.getElementById('auth-token-input');
+      const btnAgreeToken = document.getElementById('btn-agree-token');
+      const authErrorBox = document.getElementById('auth-error-box');
+
+      const bugModal = document.getElementById('bug-report-modal');
+      const btnOpenBug = document.getElementById('btn-open-bug-report');
+      const btnCloseBug = document.getElementById('btn-close-bug-report');
+      const btnSubmitBug = document.getElementById('btn-submit-bug-report');
+      const bugReportText = document.getElementById('bug-report-text');
+      const bugReportMsg = document.getElementById('bug-report-msg');
+
+      /* -----------------------------------------------------------
+         BALLOON SESSION & STORAGE ENGINE
+         ----------------------------------------------------------- */
+      function getStoredSession() {
+        return localStorage.getItem('balloon_session') || '';
+      }
+
+      function setStoredSession(token) {
+        localStorage.setItem('balloon_session', token);
+      }
+
+      function clearStoredSession() {
+        localStorage.removeItem('balloon_session');
+      }
+
+      function getStoredCatalogUrl() {
+        return localStorage.getItem('balloon_catalog_url') || '';
+      }
+
+      function setStoredCatalogUrl(url) {
+        localStorage.setItem('balloon_catalog_url', url);
+      }
+
+      function clearStoredCatalogUrl() {
+        localStorage.removeItem('balloon_catalog_url');
+      }
+
+      function setSourceLink(url) {
+        if (url) {
+          sourceLink.href = url;
+          sourceLink.style.display = 'inline';
+        } else {
+          sourceLink.href = '#';
+          sourceLink.style.display = 'none';
+        }
+      }
+
+      function showAuthPopup(errorMsg) {
+        stopHeartbeat();
+        if (errorMsg) {
+          authErrorBox.textContent = errorMsg;
+          authErrorBox.style.display = 'block';
+        } else {
+          authErrorBox.style.display = 'none';
+        }
+        authModal.classList.remove('hidden');
+        authTokenInput.focus();
+      }
+
+      function hideAuthPopup() {
+        authModal.classList.add('hidden');
+        authErrorBox.style.display = 'none';
+      }
+
+      async function sendHeartbeat() {
+        try {
+          const session = getStoredSession();
+          if (!session) {
+            showAuthPopup();
+            return false;
+          }
+
+          const headers = {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${session}`
+          };
+
+          const res = await fetch(`${API_HOST}/balloon/heartbeat?session_token=${encodeURIComponent(session)}`, {
+            method: 'POST',
+            headers
+          });
+
+          if (res.status === 401 || res.status === 403) {
+            clearStoredSession();
+            clearStoredCatalogUrl();
+            setSourceLink('');
+            showAuthPopup('Your session was revoked or expired. Please enter a renewed token.');
+            return false;
+          }
+
+          return res.ok;
+        } catch {
+          return false;
+        }
+      }
+
+      function startHeartbeat() {
+        stopHeartbeat();
+        heartbeatInterval = setInterval(sendHeartbeat, 15000);
+      }
+
+      function stopHeartbeat() {
+        if (heartbeatInterval) {
+          clearInterval(heartbeatInterval);
+          heartbeatInterval = null;
+        }
+      }
+
+      async function authenticateToken() {
+        const tokenVal = authTokenInput.value.trim();
+        if (!tokenVal) {
+          authErrorBox.textContent = 'Please enter a valid token.';
+          authErrorBox.style.display = 'block';
+          return;
+        }
+
+        btnAgreeToken.disabled = true;
+        btnAgreeToken.textContent = 'Validating...';
+
+        try {
+          const res = await fetch(`${API_HOST}/balloon/auth`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ token: tokenVal })
+          });
+
+          if (res.status === 403) {
+            throw new Error('403 Forbidden: Invalid or expired token.');
+          }
+
+          if (!res.ok) {
+            const data = await res.json().catch(() => ({}));
+            throw new Error(data.detail || `HTTP ${res.status}`);
+          }
+
+          const result = await res.json();
+
+          if (result.session_token) {
+            setStoredSession(result.session_token);
+          }
+
+          if (result.catalog_url) {
+            currentCatalogUrl = result.catalog_url;
+            setStoredCatalogUrl(currentCatalogUrl);
+            setSourceLink(currentCatalogUrl);
+          }
+
+          hideAuthPopup();
+          authTokenInput.value = '';
+          startHeartbeat();
+
+          if (currentCatalogUrl && !catalogLoaded) {
+            loadCatalog(currentCatalogUrl);
+          }
+        } catch (err) {
+          authErrorBox.textContent = err.message || '403 Forbidden: Invalid or expired token.';
+          authErrorBox.style.display = 'block';
+        } finally {
+          btnAgreeToken.disabled = false;
+          btnAgreeToken.textContent = 'Agree';
+        }
+      }
+
+      /* -----------------------------------------------------------
+         BUG REPORTING HANDLERS
+         ----------------------------------------------------------- */
+      function setupSupport() {
+        btnOpenBug.addEventListener('click', () => {
+          bugReportMsg.style.display = 'none';
+          bugReportText.value = '';
+          bugModal.classList.remove('hidden');
+          bugReportText.focus();
+        });
+
+        btnCloseBug.addEventListener('click', () => {
+          bugModal.classList.add('hidden');
+        });
+
+        btnSubmitBug.addEventListener('click', async () => {
+          const text = bugReportText.value.trim();
+          if (!text) {
+            bugReportMsg.textContent = 'Please enter bug details.';
+            bugReportMsg.style.display = 'block';
+            return;
+          }
+
+          const session = getStoredSession();
+          if (!session) {
+            bugReportMsg.textContent = 'Authentication session missing. Please sign in first.';
+            bugReportMsg.style.display = 'block';
+            return;
+          }
+
+          btnSubmitBug.disabled = true;
+          btnSubmitBug.textContent = 'Submitting...';
+
+          try {
+            const headers = {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${session}`
+            };
+
+            const res = await fetch(`${API_HOST}/balloon/support?session_token=${encodeURIComponent(session)}`, {
+              method: 'POST',
+              headers,
+              body: JSON.stringify({ message: text })
+            });
+
+            if (!res.ok) {
+              throw new Error(`HTTP ${res.status}`);
+            }
+
+            alert('Thank you! Bug report submitted successfully.');
+            bugModal.classList.add('hidden');
+          } catch (e) {
+            bugReportMsg.textContent = `Failed to send report (${e.message}). Check token status.`;
+            bugReportMsg.style.display = 'block';
+          } finally {
+            btnSubmitBug.disabled = false;
+            btnSubmitBug.textContent = 'Send Report';
+          }
+        });
+      }
+
+      /* -----------------------------------------------------------
+         MAIN CATALOG & APPLICATION INITIALIZATION
+         ----------------------------------------------------------- */
+      async function init() {
+        setupEventListeners();
+        setupSupport();
+
+        btnAgreeToken.addEventListener('click', authenticateToken);
+        authTokenInput.addEventListener('keydown', (e) => {
+          if (e.key === 'Enter') {
+            e.preventDefault();
+            authenticateToken();
+          }
+        });
+
+        const storedSession = getStoredSession();
+        const storedCatalog = getStoredCatalogUrl();
+
+        if (storedSession && storedCatalog) {
+          const alive = await sendHeartbeat();
+          if (alive) {
+            hideAuthPopup();
+            startHeartbeat();
+            currentCatalogUrl = storedCatalog;
+            setSourceLink(currentCatalogUrl);
+            loadCatalog(currentCatalogUrl);
+            return;
+          }
+        }
+
+        showAuthPopup();
+      }
+
+      function resolveUrl(urlStr, base) {
+        if (!urlStr) return '';
+        try {
+          return new URL(urlStr, base).href;
+        } catch {
+          return urlStr;
+        }
+      }
+
+      async function loadCatalog(url) {
+        statusContainer.classList.remove('hidden');
+        errorContainer.style.display = 'none';
+        grid.innerHTML = '';
+
+        try {
+          const response = await fetch(url);
+          if (!response.ok) {
+            throw new Error(`HTTP ${response.status} (${response.statusText || 'Fetch Failed'})`);
+          }
+          const data = await response.json();
+
+          let games = [];
+          if (Array.isArray(data)) {
+            games = data;
+          } else if (data && typeof data === 'object') {
+            const candidateKeys = ['games', 'data', 'items', 'results', 'list', 'content'];
+            for (const key of candidateKeys) {
+              if (Array.isArray(data[key])) {
+                games = data[key];
+                break;
+              }
+            }
+            if (games.length === 0) {
+              const vals = Object.values(data);
+              if (vals.length > 0 && typeof vals[0] === 'object') {
+                games = vals;
+              }
+            }
+          }
+
+          if (games.length === 0) {
+            throw new Error('Catalog parsed successfully, but returned 0 game items.');
+          }
+
+          allGames = games;
+          updateGameCounter(allGames);
+          resetAndRender(allGames);
+          statusContainer.classList.add('hidden');
+          catalogLoaded = true;
+        } catch (error) {
+          console.error('Catalog load failure:', error);
+          showLoadError(url, error);
+        }
+      }
+
+      function showLoadError(url, error) {
+        statusContainer.classList.add('hidden');
+        grid.innerHTML = '';
+        totalGamesElem.textContent = 'Total Games: 0';
+
+        const debugInfo = [
+          `Timestamp: ${new Date().toISOString()}`,
+          `Target Endpoint: ${url}`,
+          `Error Details: ${error.message || error}`,
+          `Stack Trace: ${error.stack || 'N/A'}`
+        ].join('\n');
+
+        technicalDetailsLog.textContent = debugInfo;
+        errorContainer.style.display = 'block';
+      }
+
+      function updateGameCounter(games) {
+        const distinctCount = new Set(games.map((g, idx) => g.id ?? g.title ?? g.name ?? g.url ?? idx)).size;
+        totalGamesElem.textContent = `Total Games: ${distinctCount}`;
+      }
+
+      /* -----------------------------------------------------------
+         INFINITE SCROLL SYSTEM
+         ----------------------------------------------------------- */
+      function resetAndRender(list) {
+        grid.innerHTML = '';
+        activeGamesList = list;
+        renderedCount = 0;
+
+        if (scrollObserver) {
+          scrollObserver.disconnect();
+          scrollObserver = null;
+        }
+
+        if (activeGamesList.length === 0) {
+          grid.innerHTML = `
+            <div style="grid-column: 1/-1; text-align: center; padding: 40px; color: var(--text-muted);">
+              No games found matching criteria.
+            </div>
+          `;
+          return;
+        }
+
+        sentinelElem = document.createElement('div');
+        sentinelElem.className = 'scroll-sentinel';
+        grid.appendChild(sentinelElem);
+
+        scrollObserver = new IntersectionObserver((entries) => {
+          if (entries[0].isIntersecting) {
+            renderNextBatch();
+          }
+        }, {
+          root: null,
+          rootMargin: '400px',
+          threshold: 0
+        });
+
+        renderNextBatch();
+
+        if (renderedCount < activeGamesList.length) {
+          scrollObserver.observe(sentinelElem);
+        } else if (sentinelElem.parentNode) {
+          sentinelElem.remove();
+        }
+      }
+
+      function renderNextBatch() {
+        if (renderedCount >= activeGamesList.length) {
+          if (scrollObserver && sentinelElem) scrollObserver.unobserve(sentinelElem);
+          if (sentinelElem && sentinelElem.parentNode) sentinelElem.remove();
+          return;
+        }
+
+        const nextBatch = activeGamesList.slice(renderedCount, renderedCount + BATCH_SIZE);
+        const fragment = document.createDocumentFragment();
+
+        nextBatch.forEach((game, index) => {
+          const globalIdx = renderedCount + index;
+          const card = createGameCard(game, globalIdx);
+          fragment.appendChild(card);
+        });
+
+        if (sentinelElem && sentinelElem.parentNode) {
+          grid.insertBefore(fragment, sentinelElem);
+        } else {
+          grid.appendChild(fragment);
+        }
+
+        renderedCount += nextBatch.length;
+
+        if (renderedCount >= activeGamesList.length) {
+          if (scrollObserver && sentinelElem) scrollObserver.unobserve(sentinelElem);
+          if (sentinelElem && sentinelElem.parentNode) sentinelElem.remove();
+        }
+      }
+
+      function createGameCard(game, index) {
+        const card = document.createElement('div');
+        card.className = 'game-card';
+        card.tabIndex = 0;
+        card.setAttribute('role', 'button');
+
+        const displayTitle = game.title || game.name || (game.id !== undefined ? `Game #${game.id}` : `Game #${index + 1}`);
+        card.setAttribute('aria-label', `Play ${displayTitle}`);
+
+        const rawCover = game.cover || game.image || game.thumbnail || game.thumb || game.img || game.icon || '';
+        const coverUrl = rawCover ? resolveUrl(rawCover, currentCatalogUrl) : '';
+
+        card.innerHTML = `
+          <div class="cover-container">
+            ${coverUrl ? `
+              <img
+                src="${escapeHtml(coverUrl)}"
+                alt="${escapeHtml(displayTitle)}"
+                class="cover-image"
+                loading="lazy"
+                decoding="async"
+                onerror="this.style.display='none'; this.nextElementSibling.style.display='block';"
+              />
+            ` : ''}
+            <span class="image-placeholder" style="${coverUrl ? 'display: none;' : ''}">No Cover</span>
+          </div>
+          <div class="card-meta">
+            <span class="game-id" title="${escapeHtml(displayTitle)}">${escapeHtml(displayTitle)}</span>
+            <button type="button" class="play-badge play-btn">Play</button>
+          </div>
+        `;
+
+        const playBtn = card.querySelector('.play-btn');
+
+        playBtn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          launchGame(game);
+        });
+
+        card.addEventListener('click', () => {
+          launchGame(game);
+        });
+
+        card.addEventListener('keydown', (e) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            launchGame(game);
+          }
+        });
+
+        return card;
+      }
+
+      function filterGames(query) {
+        const q = query.trim().toLowerCase();
+        if (!q) {
+          resetAndRender(allGames);
+          return;
+        }
+        const filtered = allGames.filter(g => {
+          const id = String(g.id ?? '');
+          const title = String(g.title ?? g.name ?? '');
+          return id.toLowerCase().includes(q) || title.toLowerCase().includes(q);
+        });
+        resetAndRender(filtered);
+      }
+
+      /* -----------------------------------------------------------
+         CORS FETCH & IN-GAME BAR LAUNCH ENGINE
+         (Preserved strictly without modification)
+         ----------------------------------------------------------- */
+      async function launchGame(game) {
+        let rawTarget = game.url || game.link || game.src || game.href || game.bin || game.file || game.path;
+        if (!rawTarget && game.id) {
+          rawTarget = `${API_BIN_BASE}${game.id}`;
+        }
+
+        if (!rawTarget) {
+          alert('Game URL property missing in catalog item.');
+          return;
+        }
+
+        const targetUrl = resolveUrl(rawTarget, API_BIN_BASE);
+        const displayTitle = game.title || game.name || (game.id !== undefined ? `Game #${game.id}` : 'Game Session');
+
+        activeGameTitle.textContent = displayTitle;
+        gameOverlay.classList.remove('hidden');
+        overlayStatusText.textContent = 'Fetching game HTML via CORS...';
+
+        if (fetchAbortController) {
+          fetchAbortController.abort();
+        }
+        fetchAbortController = new AbortController();
+
+        try {
+          // 1. Fetch game HTML directly via CORS
+          const response = await fetch(targetUrl, { signal: fetchAbortController.signal });
+          if (!response.ok) {
+            throw new Error(`HTTP ${response.status} - ${response.statusText}`);
+          }
+
+          let html = await response.text();
+
+          // 2. Compute dynamic base URL so relative assets, scripts, and media resolve
+          const urlObj = new URL(targetUrl, API_BIN_BASE);
+          const baseFolder = urlObj.href.substring(0, urlObj.href.lastIndexOf('/') + 1);
+          const baseTag = `<base href="${baseFolder}">`;
+
+          if (!html.toLowerCase().includes('<base')) {
+            if (/<head[^>]*>/i.test(html)) {
+              html = html.replace(/<head[^>]*>/i, `$&${baseTag}`);
+            } else if (/<html[^>]*>/i.test(html)) {
+              html = html.replace(/<html[^>]*>/i, `$&<head>${baseTag}</head>`);
+            } else {
+              html = baseTag + html;
+            }
+          }
+
+          // 3. Inject floating top bar without any body padding so games occupy 100% viewport with no cutoffs
+          const inGameBarHtml = `
+            <style id="balloon-bar-styles">
+              #balloon-overlay-bar {
+                position: fixed !important;
+                top: 0 !important;
+                left: 0 !important;
+                right: 0 !important;
+                width: 100% !important;
+                height: 44px !important;
+                background: rgba(0, 0, 0, 0.88) !important;
+                border-bottom: 1px solid #262626 !important;
+                display: flex !important;
+                align-items: center !important;
+                justify-content: space-between !important;
+                padding: 0 16px !important;
+                z-index: 2147483647 !important;
+                box-sizing: border-box !important;
+                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif !important;
+                color: #ffffff !important;
+                backdrop-filter: blur(8px) !important;
+              }
+              #balloon-overlay-bar .overlay-title {
+                font-size: 0.85rem !important;
+                font-weight: 700 !important;
+                letter-spacing: 0.05em !important;
+                white-space: nowrap !important;
+                overflow: hidden !important;
+                text-overflow: ellipsis !important;
+                max-width: 400px !important;
+                color: #ffffff !important;
+              }
+              #balloon-overlay-bar .bar-btn-primary {
+                background: #ffffff !important;
+                border: 1px solid #ffffff !important;
+                color: #000000 !important;
+                padding: 5px 12px !important;
+                font-size: 0.75rem !important;
+                font-weight: 700 !important;
+                text-transform: uppercase !important;
+                letter-spacing: 0.05em !important;
+                border-radius: 4px !important;
+                cursor: pointer !important;
+                display: inline-flex !important;
+                align-items: center !important;
+                white-space: nowrap !important;
+                transition: all 0.15s ease !important;
+                font-family: inherit !important;
+              }
+              #balloon-overlay-bar .bar-btn-primary:hover {
+                background: transparent !important;
+                color: #ffffff !important;
+              }
+            </style>
+
+            <div id="balloon-overlay-bar">
+              <div class="overlay-title">${escapeHtml(displayTitle)}</div>
+              <div>
+                <button id="btn-close-ingame" class="bar-btn-primary" type="button" onclick="window.location.reload()">Close</button>
+              </div>
+            </div>
+
+            <script id="balloon-controls-script">
+              window.addEventListener('keydown', function(e) {
+                if (e.key === 'Escape') {
+                  window.location.reload();
+                }
+              });
+            <\/script>
+          `;
+
+          if (/<body[^>]*>/i.test(html)) {
+            html = html.replace(/<body[^>]*>/i, `$&${inGameBarHtml}`);
+          } else {
+            html = inGameBarHtml + html;
+          }
+
+          // Push history state so the browser Back button returns to the catalog
+          try {
+            history.pushState({ inGame: true }, '');
+          } catch {}
+
+          // 4. Stream write into the window (clears cover, executes all scripts directly)
+          document.open();
+          document.write(html);
+          document.close();
+
+        } catch (err) {
+          if (err.name === 'AbortError') return;
+          console.error('Failed to load game:', err);
+          overlayStatusText.textContent = `Failed to load game (${err.message}). Check console.`;
+          overlayStatusText.style.color = '#ff6b6b';
+        }
+      }
+
+      function setupEventListeners() {
+        searchInput.addEventListener('input', (e) => filterGames(e.target.value));
+
+        btnCancelLaunch.addEventListener('click', () => {
+          if (fetchAbortController) {
+            fetchAbortController.abort();
+          }
+          gameOverlay.classList.add('hidden');
+          overlayStatusText.style.color = 'var(--text-muted)';
+        });
+      }
+
+      function escapeHtml(str) {
+        const div = document.createElement('div');
+        div.textContent = str;
+        return div.innerHTML;
+      }
+
+      init();
+    })();
+  </script>
+</body>
+</html>

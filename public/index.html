@@ -21,13 +21,15 @@
           </a>
           <p class="eyebrow">YOUR PRIVATE BROWSING SPACE</p>
           <h1>Welcome back.</h1>
-          <p class="muted signin-copy">Enter your one-time invitation. After sign-in, this browser stays connected with a secure cookie session.</p>
+          <p class="muted signin-copy">Enter your one-time invitation and choose a unique username on your first sign-in. This browser then stays connected with a secure cookie session.</p>
           <form id="signin-form" class="stack-form">
             <label for="invite-token">Invitation token</label>
             <div class="secret-input">
               <input id="invite-token" name="token" type="password" autocomplete="off" required minlength="24" maxlength="128" placeholder="Paste your private token">
               <button id="toggle-token" type="button" class="icon-button small-icon" aria-label="Show token" title="Show token"></button>
             </div>
+            <label for="invite-username">Username</label>
+            <input id="invite-username" name="username" type="text" autocomplete="username" minlength="3" maxlength="24" pattern="[A-Za-z0-9_]{3,24}" placeholder="Choose once when signing in">
             <button class="primary-button full-button" type="submit"><span>Enter workspace</span><span aria-hidden="true">↗</span></button>
             <p id="signin-error" class="form-error" role="alert" hidden></p>
           </form>
@@ -67,7 +69,7 @@
               <button id="history-open" class="icon-button tool-icon" data-movable-toolbar-item draggable="false" aria-label="Browsing history" title="History"></button>
               <button id="downloads-open" class="icon-button tool-icon" data-movable-toolbar-item draggable="false" aria-label="Downloads" title="Downloads"></button>
               <button id="assistant-open" class="icon-button tool-icon" data-movable-toolbar-item draggable="false" aria-label="Local AI assistant" title="Local AI assistant"></button>
-              <button id="games-open" class="icon-button tool-icon" data-movable-toolbar-item draggable="false" aria-label="Math games" title="Math games"></button>
+              <button id="games-open" class="icon-button tool-icon" data-movable-toolbar-item draggable="false" aria-label="Games" title="Games"></button>
               <button id="open-regular" class="icon-button tool-icon" data-movable-toolbar-item draggable="false" aria-label="Open current page in a regular tab" title="Open current page in a regular tab" hidden></button>
               <button id="theme-toggle" class="icon-button tool-icon" data-movable-toolbar-item draggable="false" aria-label="Change appearance" title="Change appearance"></button>
               <button id="settings-open" class="icon-button tool-icon" data-movable-toolbar-item draggable="false" aria-label="Settings" title="Settings"></button>
@@ -90,6 +92,8 @@
                 <input id="home-query" aria-label="Search the web" placeholder="Search privately or enter a web address">
                 <kbd>↵</kbd>
               </form>
+              <button id="home-games" class="secondary-button home-games-button" type="button"><span aria-hidden="true">▦</span> Browse games</button>
+              <button id="home-social" class="secondary-button home-games-button" type="button"><span aria-hidden="true">◌</span> Friends &amp; chat</button>
               <div class="quick-links" id="quick-links"></div>
               <section class="project-areas-card" id="project-areas-card" aria-labelledby="project-areas-title">
                 <div class="project-areas-heading"><div><span class="project-area-eyebrow">PRIVATE WORKSPACES</span><h2 id="project-areas-title">Project areas</h2></div><button id="project-area-create" class="secondary-button" type="button">＋ Add area</button></div>
@@ -105,8 +109,31 @@
               <p>Check that the local Rammerhead service is running, then retry. The address is still available to open in a regular tab.</p>
               <div class="fallback-actions"><button id="open-external" class="secondary-button" type="button">Open in a regular tab</button><button id="retry-page" class="primary-button" type="button">Try again</button></div>
             </div>
-            <iframe id="page-frame" title="Nightjar Rammerhead browsing engine" referrerpolicy="no-referrer" allow="camera 'none'; microphone 'none'; geolocation 'none'; display-capture 'none'; clipboard-read 'none'; clipboard-write 'none'"></iframe>
+            <iframe id="page-frame" title="Nightjar Rammerhead browsing engine" referrerpolicy="no-referrer" allow="autoplay; encrypted-media; fullscreen; picture-in-picture; camera 'none'; microphone 'none'; geolocation 'none'; display-capture 'none'; clipboard-read 'none'; clipboard-write 'none'"></iframe>
+            <section id="youtube-player" class="youtube-player" aria-label="YouTube video player" hidden>
+              <header class="youtube-player-header"><div><span id="youtube-player-title">YouTube video</span><p>Videos that block embedding can be opened on YouTube.</p></div><button id="youtube-open-original" class="secondary-button" type="button">Open original YouTube page</button></header>
+              <iframe id="youtube-frame" title="YouTube video" referrerpolicy="origin" allow="autoplay; encrypted-media; fullscreen; picture-in-picture"></iframe>
+            </section>
           </div>
+          <section id="games-surface" class="games-surface" aria-labelledby="games-title" hidden>
+            <header class="games-header">
+              <div><p class="eyebrow">PLAY SOMETHING NEW</p><h1 id="games-title">Games</h1><p>Games load directly from their source, outside the private browsing proxy.</p></div>
+              <div class="games-header-actions">
+                <button id="quick-math-launch" class="secondary-button" type="button">Quick Math</button>
+                <button id="games-home" class="icon-button" type="button" aria-label="Back to home" title="Back to home">⌂</button>
+              </div>
+            </header>
+            <div id="games-catalog">
+              <label class="games-search"><span aria-hidden="true">⌕</span><input id="games-search" type="search" aria-label="Search games" placeholder="Filter games by ID"></label>
+              <p id="games-status" class="games-status" role="status" aria-live="polite">Loading games…</p>
+              <div id="games-grid" class="games-grid"></div>
+              <button id="games-load-more" class="secondary-button games-load-more" type="button" hidden>Load more games</button>
+            </div>
+            <section id="game-player" class="game-player" aria-label="Game player" hidden>
+              <header class="game-player-header"><button id="game-player-back" class="secondary-button" type="button">← All games</button><strong id="game-player-title"></strong><button id="game-player-reload" class="secondary-button" type="button">Reload</button></header>
+              <iframe id="game-frame" title="Game" sandbox="allow-scripts allow-forms allow-popups allow-pointer-lock allow-downloads" allow="fullscreen; gamepad; autoplay; clipboard-read; clipboard-write" referrerpolicy="no-referrer"></iframe>
+            </section>
+          </section>
           <div id="workspace-toast" class="workspace-toast" role="status" aria-live="polite"></div>
         </section>
         <footer class="status-bar">

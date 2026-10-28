@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Nightjar game player</title>
+  </head>
+  <body>
+    <script>
+      const appOrigin = new URLSearchParams(location.search).get("appOrigin");
+      let verifiedAppOrigin = "";
+      try {
+        const parsedAppOrigin = new URL(appOrigin);
+        if (["http:", "https:"].includes(parsedAppOrigin.protocol) && parsedAppOrigin.origin === appOrigin) {
+          verifiedAppOrigin = parsedAppOrigin.origin;
+        }
+      } catch {}
+
+      window.addEventListener("message", (event) => {
+        const data = event.data;
+        if (!verifiedAppOrigin || event.origin !== verifiedAppOrigin || event.source !== window.parent || data?.source !== "nightjar-game-content") return;
+        if (typeof data.html !== "string" || typeof data.targetUrl !== "string") return;
+        let targetUrl;
+        try {
+          targetUrl = new URL(data.targetUrl);
+        } catch {
+          return;
+        }
+        if (targetUrl.protocol !== "https:") return;
+        let html = data.html;
+        if (!/<base(?:\s|>)/i.test(html)) {
+          const baseFolder = targetUrl.href.slice(0, targetUrl.href.lastIndexOf("/") + 1);
+          const baseUrl = baseFolder.replace(/[&"]/g, (character) => character === "&" ? "&amp;" : "&quot;");
+          const base = `<base href="${baseUrl}">`;
+          if (/<head(?:\s[^>]*)?>/i.test(html)) {
+            html = html.replace(/<head(?:\s[^>]*)?>/i, (head) => `${head}${base}`);
+          } else if (/<html(?:\s[^>]*)?>/i.test(html)) {
+            html = html.replace(/<html(?:\s[^>]*)?>/i, (openingHtml) => `${openingHtml}<head>${base}</head>`);
+          } else {
+            html = `<!doctype html><html><head>${base}</head><body>${html}</body></html>`;
+          }
+        }
+        document.open();
+        document.write(html);
+        document.close();
+      });
+    </script>
+  </body>
+</html>

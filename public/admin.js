@@ -1,6 +1,9 @@
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
-const state = { csrf: "", summary: null, siteControls: null, tokens: [], accounts: [], ranks: [], friends: [], sessions: [], audits: [], feedback: [], twoFactor: false, toastTimer: 0 };
+const API_ORIGIN = new URL(document.querySelector('meta[name="nightjar-api-base"]')?.content || location.origin, location.href).origin;
+const API_MODE = API_ORIGIN !== location.origin;
+const API_SESSION_KEY = `nightjar.admin-api-session:${API_ORIGIN}`;
+const state = { csrf: "", apiToken: API_MODE ? localStorage.getItem(API_SESSION_KEY) ?? "" : "", summary: null, siteControls: null, tokens: [], accounts: [], ranks: [], friends: [], sessions: [], audits: [], feedback: [], twoFactor: false, toastTimer: 0 };
 
 function esc(value = "") {
   return String(value).replace(/[&<>"']/g, (char) => ({
@@ -58,9 +61,10 @@ async function api(path, options = {}) {
   const headers = { Accept: "application/json" };
   if (options.body !== undefined) headers["Content-Type"] = "application/json";
   if (!["GET", "HEAD"].includes(method) && state.csrf) headers["X-NJ-CSRF"] = state.csrf;
+  if (API_MODE && state.apiToken) headers.Authorization = `Bearer ${state.apiToken}`;
   let response;
   try {
-    response = await fetch(path, { method, headers, credentials: "same-origin", cache: "no-store", body: options.body === undefined ? undefined : JSON.stringify(options.body) });
+    response = await fetch(new URL(path, API_ORIGIN), { method, headers, credentials: API_MODE ? "omit" : "same-origin", cache: "no-store", body: options.body === undefined ? undefined : JSON.stringify(options.body) });
   } catch {
     throw new Error("Cannot reach Nightjar. Check the local service connection.");
   }
@@ -107,7 +111,7 @@ function date(value) {
 }
 
 function statusBadge(status) {
-  const label = status === "redeemed" ? "redeemed · session cookie" : status;
+  const label = status === "redeemed" ? "redeemed · signed-in session" : status;
   return `<span class="status-badge ${esc(status)}">${esc(label)}</span>`;
 }
 
@@ -122,8 +126,8 @@ function renderMetrics() {
   $("#security-grid").innerHTML = [
     ["Owner authentication", state.twoFactor ? "Password + TOTP required" : "Password required · TOTP not enabled", state.twoFactor ? "Secure" : "Recommended", !state.twoFactor],
     ["Invitation storage", "Only SHA-256 token hashes are retained", "Secure", false],
-    ["Session enforcement", "One live session per account · 12-hour idle and maximum age", "Active", false],
-    ["Admin isolation", "Separate owner session cookie and protected endpoints", "Active", false],
+    ["Session enforcement", "Multiple sessions per account · rolling 90-day expiry · owner revocation", "Active", false],
+    ["Admin isolation", "Separate owner session and protected endpoints", "Active", false],
     ["Browser boundary", "Rammerhead on a separate origin; public HTTP(S) destinations and ports 80/443 only", "Scoped", false],
     ["Local AI assistant", `${state.summary.localAi.model} · auto-start ${state.summary.localAi.autoStart ? "enabled" : "disabled"} · ${state.summary.localAi.serviceStatus}`, state.summary.localAi.startedByApp ? "Started by Nightjar" : "Loopback only", !state.summary.localAi.autoStart],
     ["Desktop companion", state.desktopSession ? "Locally paired · no shell-command API" : "Manual start · loopback only · local approval", state.desktopSharing ? "Active" : "Not sharing", !state.desktopSession],
@@ -149,7 +153,8 @@ function renderTokens() {
     $("#token-table").innerHTML = '<div class="table-empty">No invitations yet. Create an invitation to add a private account.</div>';
     return;
   }
-  $("#token-table").innerHTML = `<div class="admin-table-wrap"><table class="admin-table"><thead><tr><th>TOKEN / ACCOUNT</th><th>RANK / PERMISSIONS</th><th>STATUS / USES</th><th>CREATED / EXPIRES</th><th></th></tr></thead><tbody>${state.tokens.map((item) => `<tr><td><div class="table-primary">${esc(item.label)}</div><div class="table-secondary">${esc(item.accountLabel)} · ${esc(item.accountId.slice(0, 8))}</div></td><td><div class="table-primary">${esc(item.rank)}</div><div class="token-permissions">${item.permissions.map((permission) => `<span>${esc(permission)}</span>`).join("")}</div></td><td>${statusBadge(item.status)}<div class="table-secondary">${item.usageCount} / 1 redemption</div><div class="table-secondary">${item.status === "redeemed" ? "The account stays signed in by its cookie." : `Last used ${esc(date(item.lastUsedAt))}`}</div></td><td>${esc(date(item.createdAt))}<div class="table-secondary">Expires ${esc(date(item.expiresAt))}</div></td><td><div class="table-actions">${item.status !== "revoked" ? `<button class="danger-button" data-revoke-token="${item.id}" type="button">Revoke</button>` : ""}</div></td></tr>`).join("")}</tbody></table></div>`;
+  $("#token-table").innerHTML = `<div class="admin-table-wrap"><table class="admin-table"><thead><tr><th>TOKEN / ACCOUNT</th><th>RANK / PERMISSIONS</th><th>STATUS / USES</th><th>CREATED / EXPIRES</th><th></th></tr></thead><tbody>${state.tokens.map((item) => `<tr><td><div class="table-primary">${esc(item.label)}</div><div class="table-secondary">${esc(item.accountLabel)} · ${esc(item.accountId.slice(0, 8))}</div></td><td><div class="table-primary">${esc(item.rank)}</div><div class="token-permissions">${item.permissions.map((permission) => `<span>${esc(permission)}</span>`).join("")}</div></td><td>${statusBadge(item.status)}<div class="table-secondary">${item.usageCount} / 1 redemption</div><div class="table-secondary">${item.status === "redeemed" ? "Signed-in browser sessions remain active." : `Last used ${esc(date(item.lastUsedAt))}`}</div></td><td>${esc(date(item.createdAt))}<div class="table-secondary">Expires ${esc(date(item.expiresAt))}</div></td><td><div class="table-actions">${item.status !== "revoked" ? `<button class="secondary-button" data-renew-token="${item.id}" type="button">Renew</button><button class="danger-button" data-revoke-token="${item.id}" type="button">Revoke</button>` : ""}</div></td></tr>`).join("")}</tbody></table></div>`;
+  $$("[data-renew-token]").forEach((button) => button.addEventListener("click", () => void renewToken(button.dataset.renewToken)));
   $$("[data-revoke-token]").forEach((button) => button.addEventListener("click", () => void revokeToken(button.dataset.revokeToken)));
 }
 
@@ -288,10 +293,10 @@ function renderFeedback() {
 
 function renderSessions() {
   if (!state.sessions.length) {
-    $("#session-table").innerHTML = '<div class="table-empty">No user sessions are active. Stale sessions expire automatically.</div>';
+    $("#session-table").innerHTML = '<div class="table-empty">No user sessions are active. Sessions expire after 90 days without activity.</div>';
     return;
   }
-  $("#session-table").innerHTML = `<div class="admin-table-wrap"><table class="admin-table"><thead><tr><th>ACCOUNT</th><th>STARTED</th><th>LAST HEARTBEAT</th><th>EXPIRES</th><th></th></tr></thead><tbody>${state.sessions.map((item) => `<tr><td><div class="table-primary">${esc(item.accountLabel)}</div><div class="table-secondary mono">${esc(item.id.slice(0, 8))}</div></td><td>${esc(date(item.createdAt))}</td><td>${esc(date(item.lastSeenAt))}</td><td>${esc(date(item.expiresAt))}</td><td><div class="table-actions"><button class="danger-button" data-terminate="${item.id}" type="button">Terminate</button></div></td></tr>`).join("")}</tbody></table></div>`;
+  $("#session-table").innerHTML = `<div class="admin-table-wrap"><table class="admin-table"><thead><tr><th>ACCOUNT</th><th>STARTED</th><th>LAST ACTIVE</th><th>EXPIRES</th><th></th></tr></thead><tbody>${state.sessions.map((item) => `<tr><td><div class="table-primary">${esc(item.accountLabel)}</div><div class="table-secondary mono">${esc(item.id.slice(0, 8))}</div></td><td>${esc(date(item.createdAt))}</td><td>${esc(date(item.lastSeenAt))}</td><td>${esc(date(item.expiresAt))}</td><td><div class="table-actions"><button class="danger-button" data-terminate="${item.id}" type="button">Revoke session</button></div></td></tr>`).join("")}</tbody></table></div>`;
   $$("[data-terminate]").forEach((button) => button.addEventListener("click", () => void terminateSession(button.dataset.terminate)));
 }
 
@@ -597,7 +602,7 @@ function inviteForm() {
     <label class="form-field"><span class="field-label">Access rank</span><select class="field-select" name="rank">${rankOptions}</select></label>
     <label class="form-field wide-field"><span class="field-label">Account label</span><input class="field-input" name="accountLabel" maxlength="80" placeholder="Defaults to token label"></label>
     <label class="form-field"><span class="field-label">Expiration (optional)</span><input class="field-input" name="expiresAt" type="datetime-local"></label>
-    <div class="form-field"><span class="field-label">Redemption limit</span><div class="permission-note"><span class="note-icon">${icon("shield")}</span><span>One sign-in. A secure cookie keeps the intended person signed in.</span></div><input name="usageLimit" type="hidden" value="1"></div>
+    <div class="form-field"><span class="field-label">Redemption limit</span><div class="permission-note"><span class="note-icon">${icon("shield")}</span><span>One sign-in. A secure session keeps the intended person signed in.</span></div><input name="usageLimit" type="hidden" value="1"></div>
     <div class="form-field wide-field"><span class="subsection-label">Permissions</span><div class="check-grid">
       <label class="check-option"><input type="checkbox" name="permission" value="browse" checked disabled> Browse (required)</label>
       <label class="check-option"><input type="checkbox" name="permission" value="bookmarks" checked> Bookmarks</label>
@@ -718,11 +723,11 @@ function createInviteDialog(friendMode = false) {
   });
 }
 
-function showToken(token, item) {
+function showToken(token, item, renewed = false) {
   openDialog({
-    title: "Invitation created",
+    title: renewed ? "Invitation renewed" : "Invitation created",
     description: `For ${item.accountLabel}. This token will not be shown again.`,
-    content: `<div class="permission-note"><span class="note-icon">${icon("shield")}</span><span>Keep this one-time invitation private and share it only with its intended person. After redemption, their browser is authenticated with a secure session cookie. A second valid invitation used while the account is active will revoke that account's access.</span></div><div class="token-reveal"><code id="issued-token" class="mono">${esc(token)}</code><button id="copy-token" class="icon-button" type="button" aria-label="Copy invitation token" title="Copy token">${icon("copy")}</button></div><p class="muted" style="font-size:9px;line-height:1.6">The database stores only the token hash. The owner console cannot retrieve this value later.</p>`,
+    content: `<div class="permission-note"><span class="note-icon">${icon("shield")}</span><span>Keep this one-time invitation private and share it only with its intended person. Signed-in browser sessions are revocable and are not ended by renewing this invitation.</span></div><div class="token-reveal"><code id="issued-token" class="mono">${esc(token)}</code><button id="copy-token" class="icon-button" type="button" aria-label="Copy invitation token" title="Copy token">${icon("copy")}</button></div><p class="muted" style="font-size:9px;line-height:1.6">The database stores only the token hash. The owner console cannot retrieve this value later.</p>`,
     footer: '<span class="muted" style="font-size:9px">Copy before closing.</span><div class="dialog-footer-right"><button id="done-token" class="primary-button" type="button">Done</button></div>',
   });
   $("#copy-token").addEventListener("click", async () => {
@@ -741,8 +746,17 @@ function showToken(token, item) {
   $("#done-token").addEventListener("click", closeDialog);
 }
 
+async function renewToken(id) {
+  if (!confirm("Renew this one-time invitation? Its old value will stop working. Existing signed-in sessions will remain active.")) return;
+  try {
+    const result = await api(`/api/admin/tokens/${id}/renew`, { method: "POST", body: {} });
+    await loadTokens();
+    showToken(result.token, result.item, true);
+  } catch (error) { toast(error.message); }
+}
+
 async function revokeToken(id) {
-  if (!confirm("Revoke this invitation and terminate its active session?")) return;
+  if (!confirm("Revoke this invitation and terminate all sessions established with it?")) return;
   try {
     await api(`/api/admin/tokens/${id}/revoke`, { method: "POST", body: {} });
     await loadTokens();
@@ -752,7 +766,7 @@ async function revokeToken(id) {
 }
 
 async function terminateSession(id) {
-  if (!confirm("Terminate this account session? The user will need a valid invitation to sign in again.")) return;
+  if (!confirm("Revoke this browser session? The user can continue on other active sessions.")) return;
   try {
     await api(`/api/admin/sessions/${id}/terminate`, { method: "POST", body: {} });
     await loadSessions();
@@ -769,6 +783,8 @@ async function lockConsole() {
     toast(error.message);
   }
   state.csrf = "";
+  if (API_MODE) localStorage.removeItem(API_SESSION_KEY);
+  state.apiToken = "";
   showLogin();
 }
 
@@ -803,8 +819,13 @@ $("#admin-login-form").addEventListener("submit", async (event) => {
   try {
     const result = await api("/api/admin/login", {
       method: "POST",
-      body: { password: $("#admin-password").value, totp: $("#admin-totp").value },
+      body: { password: $("#admin-password").value, totp: $("#admin-totp").value, apiMode: API_MODE },
     });
+    if (API_MODE) {
+      if (typeof result.sessionToken !== "string") throw new Error("The API did not return a bearer session.");
+      state.apiToken = result.sessionToken;
+      localStorage.setItem(API_SESSION_KEY, result.sessionToken);
+    }
     state.csrf = result.csrf;
     await bootstrap();
   } catch (error) {

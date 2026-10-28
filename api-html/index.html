@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark light">
+    <meta name="theme-color" content="#101111">
+    <meta name="nightjar-api-base" content="https://p-tunnel-encrypted3.bearstool.com/">
+    <title>Nightjar — private browsing space</title>
+    <link rel="icon" href="https://p-tunnel-encrypted3.bearstool.com/mark.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="https://p-tunnel-encrypted3.bearstool.com/styles.css">
+    <script src="https://p-tunnel-encrypted3.bearstool.com/app.js" type="module"></script>
+  </head>
+  <body>
+    <div class="cursor-orb" aria-hidden="true"></div>
+    <main id="app" class="app-shell" aria-live="off">
+      <section id="signin" class="signin-view" hidden>
+        <div class="signin-card">
+          <a class="brand brand-large" href="./index.html" aria-label="Nightjar home">
+            <span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 32 32"><path d="M23.9 5.1c-6.7-2.4-14.3.6-17.3 6.9-2.5 5.1-.6 11.1 4.2 14.1 3.8 2.4 9.1 1.3 10.8-2.7 1-2.2.2-4.8-1.8-5.8-1.8-1-4.1-.3-4.8 1.4-.5 1.2.1 2.5 1.2 2.9-2.9.7-5.8-1.4-6-4.5-.3-4 3-7.7 7.3-8.1 3.1-.3 5.7.8 7.6 2.6-.2-2.6-.6-4.9-1.2-6.8Z"/></svg></span>
+            <span>nightjar<span class="brand-dot">.</span></span>
+          </a>
+          <p class="eyebrow">YOUR PRIVATE BROWSING SPACE</p>
+          <h1>Welcome back.</h1>
+          <p class="muted signin-copy">Enter your one-time invitation and choose a unique username on your first sign-in. This browser then stays connected with a secure API session.</p>
+          <form id="signin-form" class="stack-form">
+            <label for="invite-token">Invitation token</label>
+            <div class="secret-input">
+              <input id="invite-token" name="token" type="password" autocomplete="off" required minlength="24" maxlength="128" placeholder="Paste your private token">
+              <button id="toggle-token" type="button" class="icon-button small-icon" aria-label="Show token" title="Show token"></button>
+            </div>
+            <label for="invite-username">Username</label>
+            <input id="invite-username" name="username" type="text" autocomplete="username" minlength="3" maxlength="24" pattern="[A-Za-z0-9_]{3,24}" placeholder="Choose once when signing in">
+            <button class="primary-button full-button" type="submit"><span>Enter workspace</span><span aria-hidden="true">↗</span></button>
+            <p id="signin-error" class="form-error" role="alert" hidden></p>
+          </form>
+          <div class="signin-foot"><span class="status-dot"></span> One-person invitation <span class="sep-dot">·</span> No public sign-up</div>
+        </div>
+      </section>
+
+      <section id="browser" class="browser" hidden>
+        <header class="top-frame">
+          <div class="window-row">
+            <a class="brand" href="#" id="brand-home" aria-label="Go to Nightjar start page">
+              <span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 32 32"><path d="M23.9 5.1c-6.7-2.4-14.3.6-17.3 6.9-2.5 5.1-.6 11.1 4.2 14.1 3.8 2.4 9.1 1.3 10.8-2.7 1-2.2.2-4.8-1.8-5.8-1.8-1-4.1-.3-4.8 1.4-.5 1.2.1 2.5 1.2 2.9-2.9.7-5.8-1.4-6-4.5-.3-4 3-7.7 7.3-8.1 3.1-.3 5.7.8 7.6 2.6-.2-2.6-.6-4.9-1.2-6.8Z"/></svg></span>
+              <span>nightjar<span class="brand-dot">.</span></span>
+            </a>
+            <div class="tab-strip" id="tab-strip" role="tablist" aria-label="Browser tabs"></div>
+            <button id="new-tab" class="new-tab icon-button" aria-label="New tab" title="New tab (Ctrl+T)"></button>
+            <div class="window-actions">
+              <button id="account-chip" class="account-chip" type="button" title="Account and session"><span class="avatar">N</span><span id="account-label">Guest</span><span class="presence"></span></button>
+              <button id="signout" class="icon-button window-icon" aria-label="Sign out" title="Sign out"></button>
+            </div>
+          </div>
+          <div class="toolbar-row">
+            <div class="nav-controls">
+              <button id="back" class="icon-button nav-icon" aria-label="Go back" title="Back (Alt+Left)" disabled></button>
+              <button id="forward" class="icon-button nav-icon" aria-label="Go forward" title="Forward (Alt+Right)" disabled></button>
+              <button id="reload" class="icon-button nav-icon" aria-label="Reload" title="Reload (Ctrl+R)"></button>
+              <button id="home" class="icon-button nav-icon" aria-label="Home" title="Home"></button>
+            </div>
+            <form id="address-form" class="address-shell" autocomplete="off">
+              <span id="address-security" class="address-security" aria-hidden="true"></span>
+              <input id="address" type="text" aria-label="Search or enter web address" placeholder="Search the web or enter an address" spellcheck="false" autocapitalize="off">
+              <button id="bookmark-current" class="address-bookmark icon-button" type="button" aria-label="Bookmark this page" title="Bookmark this page"></button>
+              <span id="load-indicator" class="load-indicator" aria-hidden="true"></span>
+            </form>
+            <div class="toolbar-tools" id="toolbar-tools">
+              <button id="bookmarks-open" class="icon-button tool-icon" data-movable-toolbar-item draggable="false" aria-label="Bookmarks" title="Bookmarks"></button>
+              <button id="history-open" class="icon-button tool-icon" data-movable-toolbar-item draggable="false" aria-label="Browsing history" title="History"></button>
+              <button id="downloads-open" class="icon-button tool-icon" data-movable-toolbar-item draggable="false" aria-label="Downloads" title="Downloads"></button>
+              <button id="assistant-open" class="icon-button tool-icon" data-movable-toolbar-item draggable="false" aria-label="Local AI assistant" title="Local AI assistant"></button>
+              <button id="games-open" class="icon-button tool-icon" data-movable-toolbar-item draggable="false" aria-label="Games" title="Games"></button>
+              <button id="open-regular" class="icon-button tool-icon" data-movable-toolbar-item draggable="false" aria-label="Open current page in a regular tab" title="Open current page in a regular tab" hidden></button>
+              <button id="theme-toggle" class="icon-button tool-icon" data-movable-toolbar-item draggable="false" aria-label="Change appearance" title="Change appearance"></button>
+              <button id="settings-open" class="icon-button tool-icon" data-movable-toolbar-item draggable="false" aria-label="Settings" title="Settings"></button>
+              <button id="help-open" class="icon-button tool-icon" data-movable-toolbar-item draggable="false" aria-label="Help and keyboard shortcuts" title="Help and keyboard shortcuts"></button>
+              <a id="admin-link" class="admin-link icon-button tool-icon" data-movable-toolbar-item draggable="false" href="./admin.html" aria-label="Owner administration" title="Owner administration" hidden></a>
+            </div>
+          </div>
+          <div class="bookmark-bar" id="bookmark-bar" aria-label="Bookmark shortcuts"></div>
+        </header>
+
+        <section class="workspace" id="workspace">
+          <div id="home-surface" class="home-surface">
+            <div class="home-content">
+              <div class="home-emblem" aria-hidden="true"><span class="home-emblem-inner"><svg viewBox="0 0 32 32"><path d="M23.9 5.1c-6.7-2.4-14.3.6-17.3 6.9-2.5 5.1-.6 11.1 4.2 14.1 3.8 2.4 9.1 1.3 10.8-2.7 1-2.2.2-4.8-1.8-5.8-1.8-1-4.1-.3-4.8 1.4-.5 1.2.1 2.5 1.2 2.9-2.9.7-5.8-1.4-6-4.5-.3-4 3-7.7 7.3-8.1 3.1-.3 5.7.8 7.6 2.6-.2-2.6-.6-4.9-1.2-6.8Z"/></svg></span></div>
+              <p class="eyebrow home-eyebrow">A QUIETER CORNER OF THE WEB</p>
+              <h1>Take the scenic route.</h1>
+              <p class="home-subtitle">A little more space. A little less noise.</p>
+              <form id="home-search" class="home-search">
+                <span class="search-glyph" aria-hidden="true"></span>
+                <input id="home-query" aria-label="Search the web" placeholder="Search privately or enter a web address">
+                <kbd>↵</kbd>
+              </form>
+              <button id="home-games" class="secondary-button home-games-button" type="button"><span aria-hidden="true">▦</span> Browse games</button>
+              <button id="home-social" class="secondary-button home-games-button" type="button"><span aria-hidden="true">◌</span> Friends &amp; chat</button>
+              <div class="quick-links" id="quick-links"></div>
+              <section class="project-areas-card" id="project-areas-card" aria-labelledby="project-areas-title">
+                <div class="project-areas-heading"><div><span class="project-area-eyebrow">PRIVATE WORKSPACES</span><h2 id="project-areas-title">Project areas</h2></div><button id="project-area-create" class="secondary-button" type="button">＋ Add area</button></div>
+                <div id="project-area-list" class="project-area-list"><p class="muted">Loading your private areas…</p></div>
+              </section>
+              <div class="home-footer"><span class="status-dot"></span><span>Protected by your private workspace</span><span class="sep-dot">·</span><span id="home-date"></span></div>
+            </div>
+          </div>
+          <div id="page-panel" class="page-panel" hidden>
+            <div class="page-fallback" id="page-fallback" hidden>
+              <div class="fallback-symbol">↗</div>
+              <h2>The private browsing engine could not open this page</h2>
+              <p>Check that the local Rammerhead service is running, then retry. The address is still available to open in a regular tab.</p>
+              <div class="fallback-actions"><button id="open-external" class="secondary-button" type="button">Open in a regular tab</button><button id="retry-page" class="primary-button" type="button">Try again</button></div>
+            </div>
+            <iframe id="page-frame" title="Nightjar Rammerhead browsing engine" referrerpolicy="no-referrer" allow="autoplay; encrypted-media; fullscreen; picture-in-picture; camera 'none'; microphone 'none'; geolocation 'none'; display-capture 'none'; clipboard-read 'none'; clipboard-write 'none'"></iframe>
+          </div>
+          <section id="games-surface" class="games-surface" aria-labelledby="games-title" hidden>
+            <header class="games-header">
+              <div><p class="eyebrow">PLAY SOMETHING NEW</p><h1 id="games-title">Games</h1><p>Games load directly from their source, outside the private browsing proxy.</p></div>
+              <div class="games-header-actions">
+                <button id="quick-math-launch" class="secondary-button" type="button">Quick Math</button>
+                <button id="games-home" class="icon-button" type="button" aria-label="Back to home" title="Back to home">⌂</button>
+              </div>
+            </header>
+            <div id="games-catalog">
+              <label class="games-search"><span aria-hidden="true">⌕</span><input id="games-search" type="search" aria-label="Search games" placeholder="Filter games by ID"></label>
+              <p id="games-status" class="games-status" role="status" aria-live="polite">Loading games…</p>
+              <div id="games-grid" class="games-grid"></div>
+              <button id="games-load-more" class="secondary-button games-load-more" type="button" hidden>Load more games</button>
+            </div>
+            <section id="game-player" class="game-player" aria-label="Game player" hidden>
+              <header class="game-player-header"><button id="game-player-back" class="secondary-button" type="button">← All games</button><strong id="game-player-title"></strong><button id="game-player-reload" class="secondary-button" type="button">Reload</button></header>
+              <iframe id="game-frame" title="Game" sandbox="allow-scripts allow-forms allow-popups allow-pointer-lock allow-downloads" allow="fullscreen; gamepad; autoplay; clipboard-read; clipboard-write" referrerpolicy="no-referrer"></iframe>
+            </section>
+          </section>
+          <div id="workspace-toast" class="workspace-toast" role="status" aria-live="polite"></div>
+        </section>
+        <footer class="status-bar">
+          <div class="status-left"><span class="shield-icon" aria-hidden="true"></span><span id="status-message">Private workspace ready</span></div>
+          <div class="status-right"><span id="connection-state">Connected</span></div>
+        </footer>
+      </section>
+    </main>
+
+    <div id="overlay-root"></div>
+    <div id="context-menu" class="context-menu" role="menu" hidden></div>
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  </body>
+</html>

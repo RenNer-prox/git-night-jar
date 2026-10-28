@@ -3,8 +3,15 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createHmac } from "node:crypto";
-import { createApp, isPublicAddress, restrictedLookup, runAdminCommand } from "../server.js";
+import { createHash, createHmac } from "node:crypto";
+import {
+  createApp,
+  isPublicAddress,
+  restrictedLookup,
+  runAdminCommand,
+  withoutGeneratedMediaAttachment,
+  withoutUnsupportedAcceptEncoding,
+} from "../server.js";
 
 const password = "a-strong-owner-password-for-tests";
 let app;
@@ -35,13 +42,14 @@ const ollamaFetch = async (url, options = {}) => {
   return new Response("not found", { status: 404 });
 };
 
-async function request(path, { method = "GET", cookie, csrf, body, origin } = {}) {
-  const headers = {};
+async function request(path, { method = "GET", cookie, csrf, body, origin, host, authorization, extraHeaders = {} } = {}) {
+  const headers = { ...extraHeaders };
   if (cookie) headers.Cookie = cookie;
   if (csrf) headers["X-NJ-CSRF"] = csrf;
+  if (authorization) headers.Authorization = authorization;
   if (origin) headers.Origin = origin;
   if (body !== undefined) headers["Content-Type"] = "application/json";
-  const response = await fetch(`${baseUrl}${path}`, {
+  const response = await fetch(host ? `http://${host}${path}` : `${baseUrl}${path}`, {
     method,
     headers,
     body: body === undefined ? undefined : JSON.stringify(body),
@@ -50,6 +58,17 @@ async function request(path, { method = "GET", cookie, csrf, body, origin } = {}
     ? await response.json()
     : await response.text();
   return { response, data };
+}
+
+async function signIn(token, { origin, apiMode = false } = {}) {
+  let result = await request("/api/auth/login", { method: "POST", origin, body: { token, apiMode } });
+  if (result.data.code === "username_required") {
+    result = await request("/api/auth/login", {
+      method: "POST", origin,
+      body: { token, apiMode, username: `test_${createHash("sha256").update(token).digest("hex").slice(0, 12)}` },
+    });
+  }
+  return result;
 }
 
 function cookieFrom(response, name) {
@@ -84,15 +103,16 @@ before(async () => {
     databasePath: join(tempDirectory, "nightjar.sqlite"),
     proxyHost: "127.0.0.1",
     proxyPort: 0,
+    gameHost: "127.0.0.1",
+    gamePort: 0,
+    appOrigin: "https://configured-ui.example",
     adminPassword: password,
     aiAutostart: false,
     desktopSecret: "a".repeat(64),
-    dashboardOrigins: ["https://dashboard.example"],
     userLoginLimit: 100,
     ollamaFetch,
   });
   await new Promise((resolve) => app.server.listen(0, "127.0.0.1", resolve));
-  await new Promise((resolve) => app.proxyServer.listen(0, "127.0.0.1", resolve));
   baseUrl = `http://127.0.0.1:${app.server.address().port}`;
   const admin = await request("/api/admin/login", {
     method: "POST",
@@ -108,7 +128,6 @@ before(async () => {
 
 after(async () => {
   if (app?.server.listening) await new Promise((resolve) => app.server.close(resolve));
-  if (app?.proxyServer.listening) await new Promise((resolve) => app.proxyServer.close(resolve));
   app?.stop();
   app?.db.close();
   if (tempDirectory) await rm(tempDirectory, { recursive: true, force: true });
@@ -117,39 +136,99 @@ after(async () => {
 test("serves the browser and keeps administrator routes isolated", async () => {
   const page = await fetch(`${baseUrl}/`);
   assert.equal(page.status, 200);
-  assert.match(page.headers.get("content-security-policy"), new RegExp(`frame-src http://127\\.0\\.0\\.1:${app.proxyServer.address().port}`));
+  assert.match(page.headers.get("content-security-policy"), new RegExp(`frame-src http://127\\.0\\.0\\.1:${app.proxyServer.address().port} http://127\\.0\\.0\\.1:${app.gameServer.address().port}`));
+  assert.match(page.headers.get("content-security-policy"), /'self'/);
+  assert.match(page.headers.get("content-security-policy"), /connect-src 'self' https:/);
   const pageHtml = await page.text();
   assert.match(pageHtml, /id="theme-toggle"/);
+  assert.match(pageHtml, /allow="autoplay; encrypted-media; fullscreen; picture-in-picture;/);
+  assert.equal((await fetch(`${baseUrl}/app.js`)).headers.get("access-control-allow-origin"), "*");
   assert.match(pageHtml, /id="help-open"/);
+  assert.match(pageHtml, /id="home-games"/);
+  assert.match(pageHtml, /id="home-social"/);
+  assert.match(pageHtml, /id="invite-username"/);
+  assert.match(pageHtml, /id="games-surface"/);
+  assert.match(pageHtml, /id="game-frame"[^>]*sandbox="allow-scripts allow-forms allow-popups allow-pointer-lock allow-downloads"/);
+  assert.match(pageHtml, /id="youtube-frame"[^>]*referrerpolicy="origin"/);
+  assert.match(pageHtml, /Videos that block embedding can be opened on YouTube/);
+  assert.match(pageHtml, /Open original YouTube page/);
+  assert.match(page.headers.get("content-security-policy"), /https:\/\/www\.youtube\.com https:\/\/www\.youtube-nocookie\.com/);
   const client = await fetch(`${baseUrl}/app.js`);
   assert.equal(client.status, 200);
+  assert.equal(client.headers.get("cache-control"), "no-store");
   const appScript = await client.text();
   assert.match(appScript, /function openHelp\(\)/);
-  assert.match(appScript, /https:\/\/gn-math\.dev/);
+  assert.match(appScript, /https:\/\/api\.bearstool\.com\/gamelinks/);
+  assert.match(appScript, /fetch\(targetUrl, \{ signal: fetchAbortController\.signal \}\)/);
+  assert.match(appScript, /let html = await response\.text\(\)/);
+  assert.match(appScript, /function openGames\(\)/);
+  assert.match(appScript, /function openSocial\(\)/);
+  assert.match(appScript, /function refreshSocial\(\)/);
+  assert.match(appScript, /function nightjarGameRoute\(address\)/);
+  assert.match(appScript, /nightjar:\/\/games\/\$\{encodeURIComponent\(game.id\)\}/);
+  assert.match(appScript, /postMessage\(\{ source: "nightjar-game-content", targetUrl, html \}, "\*"\)/);
+  assert.match(appScript, /function youtubeVideoId\(address\)/);
+  assert.match(appScript, /function showYoutubeVideo\(tab, address/);
+  assert.match(appScript, /YouTube video · embedded player/);
+  assert.match(appScript, /youtube-nocookie\.com\/embed/);
+  const proxyShell = await fetch(`${baseUrl}/dist/proxy-shell.js`);
+  assert.equal(proxyShell.status, 200);
+  assert.match(await proxyShell.text(), /nightjar:youtube-navigate/);
+  assert.match(appScript, /^function renderProjectAreas\(\)/m);
+  assert.match(appScript, /^async function loadProjectAreas\(\)/m);
   assert.match(appScript, /function openQuickMathGame\(\)/);
   assert.match(appScript, /function openProjectAreaDialog/);
   assert.match(appScript, /toolbarOrder/);
   const styles = await fetch(`${baseUrl}/styles.css`);
   assert.equal(styles.status, 200);
-  assert.match(await styles.text(), /\.game-lounge/);
+  const stylesheet = await styles.text();
+  assert.match(stylesheet, /\.game-catalog-card/);
+  assert.match(stylesheet, /\.social-layout/);
+  assert.equal(app.server, app.proxyServer);
+  assert.equal(app.server, app.gameServer);
+  const gameOrigin = baseUrl;
+  const gamePlayer = await fetch(`${gameOrigin}/games-player.html?appOrigin=${encodeURIComponent(baseUrl)}`);
+  assert.equal(gamePlayer.status, 200);
+  assert.equal(gamePlayer.headers.get("x-frame-options"), null);
+  assert.match(gamePlayer.headers.get("content-security-policy"), new RegExp(`frame-ancestors ${baseUrl.replaceAll(".", "\\.")}`));
+  const rejectedGameParent = await fetch(`${gameOrigin}/games-player.html?appOrigin=${encodeURIComponent("https://attacker.example")}`);
+  assert.equal(rejectedGameParent.status, 403);
+  const gamePlayerHtml = await gamePlayer.text();
+  assert.match(gamePlayerHtml, /if \(!\/<base/);
+  assert.match(gamePlayerHtml, /targetUrl\.href\.slice\(0, targetUrl\.href\.lastIndexOf\("\/"\) \+ 1\)/);
+  assert.match(gamePlayerHtml, /document\.open\(\)[\s\S]*document\.write\(html\)[\s\S]*document\.close\(\)/);
   const adminPage = await fetch(`${baseUrl}/admin`);
   assert.equal(adminPage.status, 200);
   const adminCsp = adminPage.headers.get("content-security-policy");
   assert.match(adminCsp, /img-src 'self' data: https: blob:/);
-  assert.match(adminCsp, /connect-src 'self' http:\/\/127\.0\.0\.1:4175/);
+  assert.match(adminCsp, /connect-src 'self' https: http:\/\/127\.0\.0\.1:4175/);
   const adminHtml = await adminPage.text();
   assert.match(adminHtml, /Administrator sign-in/);
   assert.match(adminHtml, /Pair this owner session/);
   assert.match(adminHtml, /data-panel="friends"/);
   assert.match(adminHtml, /Add friend/);
-  assert.match(adminHtml, /HttpOnly session cookie and CSRF protection/);
+  assert.match(adminHtml, /owner session and CSRF protection/);
   assert.doesNotMatch(adminHtml, /desktop-pair-code|one-time code shown in companion terminal/);
   const proxyOrigin = `http://127.0.0.1:${app.proxyServer.address().port}`;
-  const proxyPage = await fetch(`${proxyOrigin}/`);
+  const proxyPage = await fetch(`${proxyOrigin}/proxy-shell.html`);
   assert.equal(proxyPage.status, 200);
-  const proxyCsp = proxyPage.headers.get("content-security-policy");
-  assert.match(proxyCsp, new RegExp(`frame-ancestors ${baseUrl.replaceAll(".", "\\.")} http://localhost:${app.server.address().port}`));
   assert.match(await proxyPage.text(), /browsing engine/);
+  const embeddedProxyPage = await fetch(`${proxyOrigin}/proxy-shell.html?appOrigin=${encodeURIComponent(baseUrl)}`);
+  assert.equal(embeddedProxyPage.status, 200);
+  assert.match(embeddedProxyPage.headers.get("content-security-policy"), new RegExp(`frame-ancestors ${baseUrl.replaceAll(".", "\\.")}`));
+  const cloudflareOrigin = `https://127.0.0.1:${app.server.address().port}`;
+  const cloudflareProxyPage = await fetch(`${baseUrl}/proxy-shell.html?appOrigin=${encodeURIComponent(cloudflareOrigin)}`, {
+    headers: { "CF-Visitor": JSON.stringify({ scheme: "https" }) },
+  });
+  assert.equal(cloudflareProxyPage.status, 200, await cloudflareProxyPage.text());
+  assert.match(cloudflareProxyPage.headers.get("content-security-policy"), new RegExp(`frame-ancestors ${cloudflareOrigin.replaceAll(".", "\\.")}`));
+  const cloudflareGamePage = await fetch(`${baseUrl}/games-player.html?appOrigin=${encodeURIComponent(cloudflareOrigin)}`, {
+    headers: { "CF-Visitor": JSON.stringify({ scheme: "https" }) },
+  });
+  assert.equal(cloudflareGamePage.status, 200);
+  assert.match(cloudflareGamePage.headers.get("content-security-policy"), new RegExp(`frame-ancestors ${cloudflareOrigin.replaceAll(".", "\\.")}`));
+  const rejectedProxyParent = await fetch(`${proxyOrigin}/proxy-shell.html?appOrigin=${encodeURIComponent("https://attacker.example")}`);
+  assert.equal(rejectedProxyParent.status, 403);
   const directProxyShell = await fetch(`${proxyOrigin}/proxy-shell.html`);
   assert.equal(directProxyShell.status, 200);
   const directProxyHtml = await directProxyShell.text();
@@ -158,15 +237,24 @@ test("serves the browser and keeps administrator routes isolated", async () => {
   assert.doesNotMatch(directProxyHtml, /scramjet|baremux|epoxy/i);
   const proxyClient = await fetch(`${proxyOrigin}/dist/proxy-shell.js`);
   assert.equal(proxyClient.status, 200);
+  assert.equal(proxyClient.headers.get("cache-control"), "no-store");
   const proxyClientScript = await proxyClient.text();
   assert.match(proxyClientScript, /standalone-shell/);
   assert.match(proxyClientScript, /Open Nightjar/);
+  assert.match(proxyClientScript, /function handleSpecialNavigationClick/);
+  assert.match(proxyClientScript, /window\.open\(proxiedUrl\(destination\.href\), "_blank"\)/);
+  assert.match(proxyClientScript, /nightjar:youtube-navigate/);
   const unauthorizedEngineRequest = await fetch(`${proxyOrigin}/rammerhead.js`);
   assert.equal(unauthorizedEngineRequest.status, 403);
   const forbiddenProxyAsset = await fetch(`${proxyOrigin}/../server.js`);
-  assert.equal(forbiddenProxyAsset.status, 403);
+  assert.equal(forbiddenProxyAsset.status, 404);
   const forbidden = await request("/api/admin/summary");
   assert.equal(forbidden.response.status, 401);
+  const alternateHostPage = await fetch(`http://localhost:${app.server.address().port}/`);
+  assert.match(
+    alternateHostPage.headers.get("content-security-policy"),
+    new RegExp(`frame-src http://localhost:${app.proxyServer.address().port}`),
+  );
 });
 
 test("allows multiple independent owner sessions", async () => {
@@ -175,6 +263,7 @@ test("allows multiple independent owner sessions", async () => {
   assert.ok(app.db.prepare("SELECT version FROM schema_migrations WHERE version = 6").get());
   assert.ok(app.db.prepare("SELECT version FROM schema_migrations WHERE version = 7").get());
   assert.ok(app.db.prepare("SELECT version FROM schema_migrations WHERE version = 8").get());
+  assert.ok(app.db.prepare("SELECT version FROM schema_migrations WHERE version = 9").get());
 
   const secondLogin = await request("/api/admin/login", { method: "POST", body: { password } });
   assert.equal(secondLogin.response.status, 200, JSON.stringify(secondLogin.data));
@@ -194,10 +283,11 @@ test("hashes invitation tokens, enforces permissions, and persists bookmarks, hi
   const issued = await issueToken({ label: "Research account", usageLimit: 1 });
   assert.equal(issued.item.status, "active");
   assert.ok(!JSON.stringify(app.db.prepare("SELECT token_hash FROM tokens").all()).includes(issued.token));
-  const login = await request("/api/auth/login", { method: "POST", body: { token: issued.token } });
+  const login = await signIn(issued.token);
   assert.equal(login.response.status, 200, JSON.stringify(login.data));
   assert.match(login.response.headers.get("set-cookie"), /HttpOnly/);
   assert.match(login.response.headers.get("set-cookie"), /SameSite=Strict/);
+  assert.match(login.response.headers.get("set-cookie"), /Max-Age=7776000/);
   const userCookie = cookieFrom(login.response, "nj_session");
   const userCsrf = login.data.csrf;
   assert.equal(login.data.account.label, "Research account");
@@ -207,7 +297,11 @@ test("hashes invitation tokens, enforces permissions, and persists bookmarks, hi
   const sessionRow = app.db.prepare("SELECT id FROM sessions WHERE account_id = ? AND principal = 'user'").get(issued.item.accountId);
   app.db.prepare("UPDATE sessions SET last_seen_at = ? WHERE id = ?")
     .run(new Date(Date.now() - 2 * 60_000).toISOString(), sessionRow.id);
-  assert.equal((await request("/api/session", { cookie: userCookie })).response.status, 200, "a short idle period must not invalidate the cookie session");
+  const refreshedSession = await request("/api/session", { cookie: userCookie });
+  assert.equal(refreshedSession.response.status, 200, "an active cookie session should remain valid");
+  assert.match(refreshedSession.response.headers.get("set-cookie"), /Max-Age=7776000/);
+  const refreshedExpiry = app.db.prepare("SELECT expires_at FROM sessions WHERE id = ?").get(sessionRow.id).expires_at;
+  assert.ok(Date.parse(refreshedExpiry) > Date.now() + 89 * 24 * 60 * 60 * 1000);
   const tokenList = await request("/api/admin/tokens", { cookie: adminCookie });
   assert.equal(tokenList.data.items.find((item) => item.id === issued.item.id).status, "redeemed");
   const grant = await request("/api/browser/grant", {
@@ -215,11 +309,33 @@ test("hashes invitation tokens, enforces permissions, and persists bookmarks, hi
   });
   assert.equal(grant.response.status, 200, JSON.stringify(grant.data));
   assert.equal(grant.data.proxyOrigin, `http://127.0.0.1:${app.proxyServer.address().port}`);
+  assert.equal(grant.data.gameOrigin, `http://127.0.0.1:${app.gameServer.address().port}`);
   assert.match(grant.data.sessionId, /^[a-f0-9]{32}$/i);
+  const cloudflareConfig = await request("/api/browser/config", {
+    cookie: userCookie,
+    extraHeaders: { "CF-Visitor": JSON.stringify({ scheme: "https" }) },
+  });
+  assert.equal(cloudflareConfig.response.status, 200);
+  assert.equal(cloudflareConfig.data.proxyOrigin, `https://127.0.0.1:${app.server.address().port}`);
+  assert.equal(cloudflareConfig.data.gameOrigin, cloudflareConfig.data.proxyOrigin);
+  const alternateOrigin = `http://localhost:${app.server.address().port}`;
+  const alternateHostGrant = await request("/api/browser/grant", {
+    method: "POST",
+    cookie: userCookie,
+    csrf: userCsrf,
+    body: {},
+    origin: alternateOrigin,
+    host: `localhost:${app.server.address().port}`,
+  });
+  assert.equal(alternateHostGrant.response.status, 200, JSON.stringify(alternateHostGrant.data));
+  assert.equal(alternateHostGrant.data.proxyOrigin, `http://localhost:${app.proxyServer.address().port}`);
+  assert.equal(alternateHostGrant.data.gameOrigin, `http://localhost:${app.gameServer.address().port}`);
   const proxyPort = app.proxyServer.address().port;
   const proxiedPage = `${grant.data.proxyOrigin}/${grant.data.sessionId}/https://example.org/`;
   const blockedLoopback = await fetch(`${grant.data.proxyOrigin}/${grant.data.sessionId}/http://127.0.0.1:${proxyPort}/`);
   assert.equal(blockedLoopback.status, 403);
+  const blockedLoopbackWithCharset = await fetch(`${grant.data.proxyOrigin}/${grant.data.sessionId}!s!utf-8/https://127.0.0.1/`);
+  assert.equal(blockedLoopbackWithCharset.status, 403);
   const blockedPrivatePort = await fetch(`${grant.data.proxyOrigin}/${grant.data.sessionId}/http://example.org:8080/`);
   assert.equal(blockedPrivatePort.status, 403);
   const rammerheadScript = await fetch(`${grant.data.proxyOrigin}/rammerhead.js`, {
@@ -227,6 +343,19 @@ test("hashes invitation tokens, enforces permissions, and persists bookmarks, hi
   });
   assert.equal(rammerheadScript.status, 200);
   assert.match(rammerheadScript.headers.get("content-type"), /javascript/);
+  const shuffleDictionary = await fetch(`${grant.data.proxyOrigin}/api/shuffleDict?id=${grant.data.sessionId}`, {
+    headers: { Referer: proxiedPage },
+  });
+  assert.equal(shuffleDictionary.status, 200);
+  const shuffleDictionaryText = await shuffleDictionary.text();
+  assert.doesNotThrow(() => JSON.parse(shuffleDictionaryText));
+  const disabledLocalStorageSync = await fetch(`${grant.data.proxyOrigin}/syncLocalStorage?sessionId=${grant.data.sessionId}&origin=${encodeURIComponent("https://example.org")}`, {
+    method: "POST",
+    headers: { Referer: proxiedPage, "Content-Type": "application/json" },
+    body: JSON.stringify({ type: "sync", fetch: true }),
+  });
+  assert.equal(disabledLocalStorageSync.status, 404);
+  assert.match(await disabledLocalStorageSync.text(), /disabled localStorage sync/);
   const blockedSessionCreation = await fetch(`${grant.data.proxyOrigin}/newsession`, {
     headers: { Referer: proxiedPage },
   });
@@ -332,8 +461,90 @@ test("hashes invitation tokens, enforces permissions, and persists bookmarks, hi
   });
   assert.equal(revoked.response.status, 200);
   assert.equal((await request("/api/session", { cookie: userCookie })).response.status, 401);
-  const reuse = await request("/api/auth/login", { method: "POST", body: { token: issued.token } });
+  const reuse = await signIn(issued.token);
   assert.equal(reuse.response.status, 401);
+});
+
+test("claims unique immutable usernames and restricts direct messages to accepted friends", async () => {
+  const firstInvite = await issueToken({ label: "Social one" });
+  const missingUsername = await request("/api/auth/login", { method: "POST", body: { token: firstInvite.token } });
+  assert.equal(missingUsername.response.status, 409);
+  assert.equal(missingUsername.data.code, "username_required");
+  assert.equal(app.db.prepare("SELECT usage_count FROM tokens WHERE id = ?").get(firstInvite.item.id).usage_count, 0);
+
+  const firstLogin = await request("/api/auth/login", {
+    method: "POST", body: { token: firstInvite.token, username: "NightOwl" },
+  });
+  assert.equal(firstLogin.response.status, 200, JSON.stringify(firstLogin.data));
+  assert.equal(firstLogin.data.account.username, "NightOwl");
+  const firstCookie = cookieFrom(firstLogin.response, "nj_session");
+
+  const collisionInvite = await issueToken({ label: "Collision" });
+  const collision = await request("/api/auth/login", {
+    method: "POST", body: { token: collisionInvite.token, username: "nightowl" },
+  });
+  assert.equal(collision.response.status, 409);
+  assert.equal(collision.data.code, "username_taken");
+  assert.equal(app.db.prepare("SELECT usage_count FROM tokens WHERE id = ?").get(collisionInvite.item.id).usage_count, 0);
+
+  const secondInvite = await issueToken({ label: "Social two" });
+  const secondLogin = await request("/api/auth/login", {
+    method: "POST", body: { token: secondInvite.token, username: "day_owl" },
+  });
+  assert.equal(secondLogin.response.status, 200, JSON.stringify(secondLogin.data));
+  const secondCookie = cookieFrom(secondLogin.response, "nj_session");
+  const thirdInvite = await issueToken({ label: "Social three" });
+  const thirdLogin = await signIn(thirdInvite.token);
+  const thirdCookie = cookieFrom(thirdLogin.response, "nj_session");
+
+  const requestWithoutCsrf = await request("/api/social/requests", {
+    method: "POST", cookie: firstCookie, body: { username: "day_owl" },
+  });
+  assert.equal(requestWithoutCsrf.response.status, 403);
+  const sendRequest = await request("/api/social/requests", {
+    method: "POST", cookie: firstCookie, csrf: firstLogin.data.csrf, body: { username: "DAY_OWL" },
+  });
+  assert.equal(sendRequest.response.status, 201, JSON.stringify(sendRequest.data));
+
+  const incoming = await request("/api/social", { cookie: secondCookie });
+  assert.deepEqual(incoming.data.incoming.map(({ username }) => username), ["NightOwl"]);
+  const prematureMessage = await request(`/api/social/friends/${firstInvite.item.accountId}/messages`, {
+    method: "POST", cookie: secondCookie, csrf: secondLogin.data.csrf, body: { message: "Not yet" },
+  });
+  assert.equal(prematureMessage.response.status, 403);
+
+  const accept = await request(`/api/social/requests/${sendRequest.data.id}`, {
+    method: "POST", cookie: secondCookie, csrf: secondLogin.data.csrf,
+  });
+  assert.equal(accept.response.status, 200);
+  const sentMessage = await request(`/api/social/friends/${secondInvite.item.accountId}/messages`, {
+    method: "POST", cookie: firstCookie, csrf: firstLogin.data.csrf, body: { message: "Hello, friend." },
+  });
+  assert.equal(sentMessage.response.status, 201);
+  const received = await request(`/api/social/friends/${firstInvite.item.accountId}/messages`, { cookie: secondCookie });
+  assert.equal(received.data.messages.length, 1);
+  assert.equal(received.data.messages[0].body, "Hello, friend.");
+  assert.equal(received.data.messages[0].senderId, firstInvite.item.accountId);
+  const privateMessages = await request(`/api/social/friends/${firstInvite.item.accountId}/messages`, { cookie: thirdCookie });
+  assert.equal(privateMessages.response.status, 403);
+
+  const remove = await request(`/api/social/friends/${secondInvite.item.accountId}`, {
+    method: "DELETE", cookie: firstCookie, csrf: firstLogin.data.csrf,
+  });
+  assert.equal(remove.response.status, 200);
+  const removedChat = await request(`/api/social/friends/${secondInvite.item.accountId}/messages`, { cookie: firstCookie });
+  assert.equal(removedChat.response.status, 403);
+  app.db.prepare("UPDATE accounts SET username = NULL WHERE id = ?").run(thirdInvite.item.accountId);
+  const legacyClaim = await request("/api/account/username", {
+    method: "POST", cookie: thirdCookie, csrf: thirdLogin.data.csrf, body: { username: "legacy_owl" },
+  });
+  assert.equal(legacyClaim.response.status, 200);
+  assert.equal(legacyClaim.data.username, "legacy_owl");
+  const changedUsername = await request("/api/account/username", {
+    method: "POST", cookie: thirdCookie, csrf: thirdLogin.data.csrf, body: { username: "new_owl" },
+  });
+  assert.equal(changedUsername.response.status, 409);
+  assert.equal(changedUsername.data.code, "username_immutable");
 });
 
 test("blocks Rammerhead outbound connections to private and reserved addresses", async () => {
@@ -352,38 +563,93 @@ test("blocks Rammerhead outbound connections to private and reserved addresses",
   }));
 });
 
-test("a second active account sign-in revokes authorization and permits a replacement invitation", async () => {
+test("removes unsupported zstd negotiation from proxied requests", () => {
+  assert.equal(withoutUnsupportedAcceptEncoding("gzip, deflate, br, zstd"), "gzip, deflate, br");
+  assert.equal(withoutUnsupportedAcceptEncoding("zstd, gzip;q=0.8"), "gzip;q=0.8");
+  assert.equal(withoutUnsupportedAcceptEncoding("zstd"), "identity");
+  assert.equal(withoutUnsupportedAcceptEncoding(undefined), undefined);
+});
+
+test("keeps top-level audio and video inline unless the origin explicitly requests attachment", () => {
+  assert.deepEqual(withoutGeneratedMediaAttachment([
+    "content-type", "video/mp4",
+    "content-disposition", "attachment;",
+    "content-length", "1024",
+  ]), ["content-type", "video/mp4", "content-length", "1024"]);
+  assert.deepEqual(withoutGeneratedMediaAttachment({
+    "Content-Type": "audio/mpeg; charset=binary",
+    "Content-Disposition": "attachment;",
+  }), { "Content-Type": "audio/mpeg; charset=binary" });
+  assert.deepEqual(withoutGeneratedMediaAttachment({
+    "content-type": "audio/mpeg",
+    "content-disposition": "attachment; filename=track.mp3",
+  }), {
+    "content-type": "audio/mpeg",
+    "content-disposition": "attachment; filename=track.mp3",
+  });
+  assert.deepEqual(withoutGeneratedMediaAttachment({
+    "content-type": "application/pdf",
+    "content-disposition": "attachment;",
+  }), {
+    "content-type": "application/pdf",
+    "content-disposition": "attachment;",
+  });
+});
+
+test("account sessions persist across sign-ins and can be individually revoked", async () => {
   const issued = await issueToken({ label: "Single session" });
   const secondInvitation = await issueToken({ label: "Second invite", accountId: issued.item.accountId });
-  const firstLogin = await request("/api/auth/login", { method: "POST", body: { token: issued.token } });
+  const firstLogin = await signIn(issued.token);
   assert.equal(firstLogin.response.status, 200);
   const firstCookie = cookieFrom(firstLogin.response, "nj_session");
-  const spentToken = await request("/api/auth/login", { method: "POST", body: { token: issued.token } });
+  const spentToken = await signIn(issued.token);
   assert.equal(spentToken.response.status, 401);
   assert.equal((await request("/api/session", { cookie: firstCookie })).response.status, 200);
-  const conflict = await request("/api/auth/login", { method: "POST", body: { token: secondInvitation.token } });
-  assert.equal(conflict.response.status, 409);
-  assert.equal((await request("/api/session", { cookie: firstCookie })).response.status, 401);
+  const secondLogin = await signIn(secondInvitation.token);
+  assert.equal(secondLogin.response.status, 200, JSON.stringify(secondLogin.data));
+  const secondCookie = cookieFrom(secondLogin.response, "nj_session");
+  assert.equal((await request("/api/session", { cookie: firstCookie })).response.status, 200);
+  assert.equal((await request("/api/session", { cookie: secondCookie })).response.status, 200);
 
-  const listed = await request("/api/admin/tokens", { cookie: adminCookie });
-  const revoked = listed.data.items.find((item) => item.id === issued.item.id);
-  assert.equal(revoked.status, "revoked");
-  assert.equal(listed.data.items.find((item) => item.id === secondInvitation.item.id).status, "revoked");
-  const replacement = await issueToken({ label: "Replacement", accountId: issued.item.accountId });
-  const relogin = await request("/api/auth/login", { method: "POST", body: { token: replacement.token } });
-  assert.equal(relogin.response.status, 200, JSON.stringify(relogin.data));
-  const newCookie = cookieFrom(relogin.response, "nj_session");
-  const sessionId = app.db.prepare("SELECT id FROM sessions WHERE principal = 'user' AND account_id = ?").get(replacement.item.accountId).id;
+  const firstHash = createHash("sha256").update(firstCookie.slice("nj_session=".length)).digest("hex");
+  const sessionId = app.db.prepare("SELECT id FROM sessions WHERE session_hash = ?").get(firstHash).id;
   const terminate = await request(`/api/admin/sessions/${sessionId}/terminate`, {
     method: "POST", cookie: adminCookie, csrf: adminCsrf, body: {},
   });
   assert.equal(terminate.response.status, 200);
-  assert.equal((await request("/api/session", { cookie: newCookie })).response.status, 401);
+  assert.equal((await request("/api/session", { cookie: firstCookie })).response.status, 401);
+  assert.equal((await request("/api/session", { cookie: secondCookie })).response.status, 200);
+  const listed = await request("/api/admin/tokens", { cookie: adminCookie });
+  assert.equal(listed.data.items.find((item) => item.id === issued.item.id).status, "redeemed");
+});
+
+test("owners can renew single-use tokens without ending existing cookie sessions", async () => {
+  const issued = await issueToken({ label: "Renewable invitation" });
+  const login = await signIn(issued.token);
+  const userCookie = cookieFrom(login.response, "nj_session");
+  const renewed = await request(`/api/admin/tokens/${issued.item.id}/renew`, {
+    method: "POST", cookie: adminCookie, csrf: adminCsrf, body: {},
+  });
+  assert.equal(renewed.response.status, 200, JSON.stringify(renewed.data));
+  assert.notEqual(renewed.data.token, issued.token);
+  assert.equal(renewed.data.item.status, "active");
+  assert.equal((await request("/api/session", { cookie: userCookie })).response.status, 200);
+  assert.equal((await request("/api/auth/login", { method: "POST", body: { token: issued.token } })).response.status, 401);
+  const nextLogin = await signIn(renewed.data.token);
+  assert.equal(nextLogin.response.status, 200);
+  const nextCookie = cookieFrom(nextLogin.response, "nj_session");
+  app.db.prepare("UPDATE tokens SET expires_at = ? WHERE id = ?")
+    .run(new Date(Date.now() - 1000).toISOString(), issued.item.id);
+  assert.equal((await request("/api/session", { cookie: nextCookie })).response.status, 200);
+  const proxyGrant = await request("/api/browser/grant", {
+    method: "POST", cookie: nextCookie, csrf: nextLogin.data.csrf, origin: baseUrl, body: {},
+  });
+  assert.equal(proxyGrant.response.status, 200, "an established session remains authorized after invitation expiry");
 });
 
 test("feature grants are enforced and the administrator can revoke and audit access", async () => {
   const issued = await issueToken({ label: "Browse only", features: [], permissions: ["browse"] });
-  const login = await request("/api/auth/login", { method: "POST", body: { token: issued.token } });
+  const login = await signIn(issued.token);
   const cookie = cookieFrom(login.response, "nj_session");
   const chatDenied = await request("/api/ai/chat", {
     method: "POST", cookie, csrf: login.data.csrf, body: { messages: [{ role: "user", content: "Hello" }] },
@@ -396,7 +662,7 @@ test("feature grants are enforced and the administrator can revoke and audit acc
   assert.equal(summary.response.status, 200);
   assert.ok(summary.data.localAi);
   const audit = await request("/api/admin/audit?limit=100", { cookie: adminCookie });
-  assert.ok(audit.data.items.some((item) => item.action === "token.concurrent_use"));
+  assert.ok(audit.data.items.some((item) => item.action === "session.created" && item.subject === issued.item.accountId));
 });
 
 test("owner CLI creates one-time invitations and revokes their active session", async () => {
@@ -409,7 +675,7 @@ test("owner CLI creates one-time invitations and revokes their active session", 
   assert.deepEqual(created.permissions, ["browse", "bookmarks"]);
   assert.deepEqual(created.features, ["bookmarks"]);
   assert.ok(!app.db.prepare("SELECT token_hash FROM tokens WHERE id = ?").get(created.id).token_hash.includes(created.token));
-  const login = await request("/api/auth/login", { method: "POST", body: { token: created.token } });
+  const login = await signIn(created.token);
   assert.equal(login.response.status, 200);
   const cookie = cookieFrom(login.response, "nj_session");
   const revoked = await runAdminCommand(["tokens", "revoke", created.id], { databasePath: join(tempDirectory, "nightjar.sqlite") });
@@ -423,20 +689,20 @@ test("provides the five built-in ranks and protects built-in presets", async () 
   const ranks = await runAdminCommand(["ranks"], { databasePath: join(tempDirectory, "nightjar.sqlite") });
   const byId = new Map(ranks.items.map((rank) => [rank.id, rank]));
   assert.deepEqual(["basic", "basic-plus", "ai", "full-minus", "owner"].map((id) => byId.get(id)?.label), ["Basic", "Basic+", "AI", "Full-", "Owner"]);
-  assert.deepEqual(byId.get("basic").features, ["assistant"]);
-  assert.deepEqual(byId.get("basic-plus").features, ["bookmarks", "history", "assistant"]);
-  assert.deepEqual(byId.get("ai").features, ["bookmarks", "history", "assistant"]);
+  assert.deepEqual(byId.get("basic").features, ["assistant", "games"]);
+  assert.deepEqual(byId.get("basic-plus").features, ["bookmarks", "history", "assistant", "games"]);
+  assert.deepEqual(byId.get("ai").features, ["bookmarks", "history", "assistant", "games"]);
   assert.ok(!byId.get("ai").features.includes("settings"));
   assert.ok(byId.get("full-minus").features.includes("settings"));
   assert.deepEqual(byId.get("owner").features, byId.get("full-minus").features);
   const basicToken = await runAdminCommand(["token", "make", "Basic invite", "basic"], {
     databasePath: join(tempDirectory, "nightjar.sqlite"),
   });
-  assert.deepEqual(basicToken.features, ["assistant"]);
+  assert.deepEqual(basicToken.features, ["assistant", "games"]);
   const basicPlusToken = await runAdminCommand(["token", "make", "Basic plus invite", "basic-plus"], {
     databasePath: join(tempDirectory, "nightjar.sqlite"),
   });
-  assert.deepEqual(basicPlusToken.features, ["bookmarks", "history", "assistant"]);
+  assert.deepEqual(basicPlusToken.features, ["bookmarks", "history", "assistant", "games"]);
   const aiToken = await runAdminCommand(["token", "make", "AI invite", "ai"], {
     databasePath: join(tempDirectory, "nightjar.sqlite"),
   });
@@ -487,7 +753,7 @@ test("owner can manage ranks and review private support requests", async () => {
   })).response.status, 200);
 
   const invitation = await issueToken({ label: "Feedback user", rank: "basic", permissions: ["browse", "support"], features: ["support"] });
-  const login = await request("/api/auth/login", { method: "POST", body: { token: invitation.token } });
+  const login = await signIn(invitation.token);
   const cookie = cookieFrom(login.response, "nj_session");
   const message = await request("/api/feedback", {
     method: "POST", cookie, csrf: login.data.csrf,
@@ -508,11 +774,11 @@ test("owner can manage ranks and review private support requests", async () => {
 test("Owner rank is server-authorized and the token dashboard never exposes secrets", async () => {
   const unauthorized = await request("/api/owner/dashboard/tokens", { origin: "https://dashboard.example" });
   assert.equal(unauthorized.response.status, 401);
-  assert.equal(unauthorized.response.headers.get("access-control-allow-origin"), "https://dashboard.example");
-  assert.equal((await request("/api/owner/dashboard/tokens", { origin: "https://untrusted.example" })).response.status, 403);
+  assert.equal(unauthorized.response.headers.get("access-control-allow-origin"), "*");
+  assert.equal((await request("/api/owner/dashboard/tokens", { origin: "https://untrusted.example" })).response.status, 401);
 
   const invitation = await issueToken({ label: "Dashboard reader", rank: "basic-plus" });
-  const regularLogin = await request("/api/auth/login", { method: "POST", body: { token: invitation.token } });
+  const regularLogin = await signIn(invitation.token);
   const regularCookie = cookieFrom(regularLogin.response, "nj_session");
   assert.equal((await request("/api/admin/me", { cookie: regularCookie })).response.status, 403);
   assert.equal((await request("/api/owner/dashboard/tokens", {
@@ -520,14 +786,15 @@ test("Owner rank is server-authorized and the token dashboard never exposes secr
   })).response.status, 403);
 
   const ownerInvite = await issueToken({ label: "Owner dashboard", rank: "owner" });
-  const ownerLogin = await request("/api/auth/login", { method: "POST", body: { token: ownerInvite.token } });
+  const ownerLogin = await signIn(ownerInvite.token);
   const ownerCookie = cookieFrom(ownerLogin.response, "nj_session");
   assert.equal((await request("/api/admin/me", { cookie: ownerCookie })).response.status, 200);
   const dashboard = await request("/api/owner/dashboard/tokens", {
     cookie: ownerCookie, origin: "https://dashboard.example",
   });
   assert.equal(dashboard.response.status, 200, JSON.stringify(dashboard.data));
-  assert.equal(dashboard.response.headers.get("access-control-allow-credentials"), "true");
+  assert.equal(dashboard.response.headers.get("access-control-allow-origin"), "*");
+  assert.equal(dashboard.response.headers.get("access-control-allow-credentials"), null);
   assert.equal(dashboard.data.summary.total, dashboard.data.tokens.length);
   const item = dashboard.data.tokens.find((token) => token.id === invitation.item.id);
   assert.deepEqual(Object.keys(item).sort(), [
@@ -546,12 +813,64 @@ test("Owner rank is server-authorized and the token dashboard never exposes secr
     headers: {
       Origin: "https://dashboard.example",
       "Access-Control-Request-Method": "GET",
-      "Access-Control-Request-Headers": "content-type",
+      "Access-Control-Request-Headers": "authorization, content-type, x-nj-csrf",
     },
   });
   assert.equal(preflight.status, 204);
-  assert.equal(preflight.headers.get("access-control-allow-methods"), "GET, OPTIONS");
-  assert.equal(preflight.headers.get("access-control-allow-origin"), "https://dashboard.example");
+  assert.match(preflight.headers.get("access-control-allow-methods"), /DELETE/);
+  assert.equal(preflight.headers.get("access-control-allow-origin"), "*");
+  assert.match(preflight.headers.get("access-control-allow-headers"), /Authorization/i);
+  assert.equal(preflight.headers.get("access-control-allow-credentials"), null);
+});
+
+test("API-mode bearer sessions work cross-origin without cookies and can be revoked", async () => {
+  const origin = "https://static-ui.example";
+  const invitation = await issueToken({ label: "API-mode user", rank: "basic-plus" });
+  const login = await signIn(invitation.token, { origin, apiMode: true });
+  assert.equal(login.response.status, 200, JSON.stringify(login.data));
+  assert.equal(login.response.headers.get("access-control-allow-origin"), "*");
+  assert.equal(login.response.headers.get("set-cookie"), null);
+  assert.match(login.data.sessionToken, /^[A-Za-z0-9_-]{43}$/);
+  const authorization = `Bearer ${login.data.sessionToken}`;
+
+  const session = await request("/api/session", { authorization, origin });
+  assert.equal(session.response.status, 200, JSON.stringify(session.data));
+  assert.equal(session.response.headers.get("access-control-allow-origin"), "*");
+  assert.equal(session.data.account.label, "API-mode user");
+  assert.equal(session.response.headers.get("set-cookie"), null);
+  const grant = await request("/api/browser/grant", {
+    method: "POST", origin, authorization, csrf: session.data.csrf, body: {},
+  });
+  assert.equal(grant.response.status, 200, JSON.stringify(grant.data));
+  assert.equal(grant.response.headers.get("access-control-allow-origin"), "*");
+  assert.equal(grant.data.proxyOrigin, grant.data.gameOrigin);
+
+  const logout = await request("/api/auth/logout", {
+    method: "POST", origin, authorization, csrf: session.data.csrf, body: {},
+  });
+  assert.equal(logout.response.status, 200);
+  assert.equal(logout.response.headers.get("set-cookie"), null);
+  assert.equal((await request("/api/session", { authorization, origin })).response.status, 401);
+});
+
+test("API-mode administrator bearer sessions support owner-console operations and logout", async () => {
+  const origin = "https://static-ui.example";
+  const login = await request("/api/admin/login", {
+    method: "POST", origin, body: { password, apiMode: true },
+  });
+  assert.equal(login.response.status, 200, JSON.stringify(login.data));
+  assert.equal(login.response.headers.get("set-cookie"), null);
+  const authorization = `Bearer ${login.data.sessionToken}`;
+  const me = await request("/api/admin/me", { authorization, origin });
+  assert.equal(me.response.status, 200, JSON.stringify(me.data));
+  const dashboard = await request("/api/owner/dashboard/tokens", { authorization, origin });
+  assert.equal(dashboard.response.status, 200, JSON.stringify(dashboard.data));
+  assert.equal(dashboard.response.headers.get("access-control-allow-origin"), "*");
+  const logout = await request("/api/admin/logout", {
+    method: "POST", authorization, origin, csrf: me.data.csrf, body: {},
+  });
+  assert.equal(logout.response.status, 200);
+  assert.equal((await request("/api/admin/me", { authorization, origin })).response.status, 401);
 });
 
 test("friends can be added one at a time without receiving admin access", async () => {
@@ -561,7 +880,7 @@ test("friends can be added one at a time without receiving admin access", async 
   assert.equal(friendList.response.status, 200);
   assert.equal(friendList.data.items.length, 1);
   assert.equal(friendList.data.items[0].id, friendInvite.item.accountId);
-  const friendLogin = await request("/api/auth/login", { method: "POST", body: { token: friendInvite.token } });
+  const friendLogin = await signIn(friendInvite.token);
   assert.equal(friendLogin.response.status, 200, JSON.stringify(friendLogin.data));
   const friendCookie = cookieFrom(friendLogin.response, "nj_session");
   assert.equal((await request("/api/admin/summary", { cookie: friendCookie })).response.status, 403);
@@ -578,7 +897,7 @@ test("friends can be added one at a time without receiving admin access", async 
 
 test("project areas are private to each signed-in account", async () => {
   const firstInvite = await issueToken({ label: "Alex" });
-  const firstLogin = await request("/api/auth/login", { method: "POST", body: { token: firstInvite.token } });
+  const firstLogin = await signIn(firstInvite.token);
   assert.equal(firstLogin.response.status, 200, JSON.stringify(firstLogin.data));
   const firstCookie = cookieFrom(firstLogin.response, "nj_session");
   const defaults = await request("/api/project-areas", { cookie: firstCookie });
@@ -591,7 +910,7 @@ test("project areas are private to each signed-in account", async () => {
   assert.equal(created.data.item.label, "Alex's Research");
 
   const secondInvite = await issueToken({ label: "Morgan" });
-  const secondLogin = await request("/api/auth/login", { method: "POST", body: { token: secondInvite.token } });
+  const secondLogin = await signIn(secondInvite.token);
   assert.equal(secondLogin.response.status, 200, JSON.stringify(secondLogin.data));
   const secondCookie = cookieFrom(secondLogin.response, "nj_session");
   assert.deepEqual((await request("/api/project-areas", { cookie: secondCookie })).data.items.map((area) => area.label).sort(), ["Morgan's Proxy", "Morgan's games"].sort());
@@ -607,7 +926,7 @@ test("project areas are private to each signed-in account", async () => {
 
 test("Basic AI quota is token-scoped and Full- customization is permission-gated", async () => {
   const basic = await issueToken({ label: "Basic AI quota", rank: "basic", permissions: ["browse", "assistant"], features: ["assistant"] });
-  const basicLogin = await request("/api/auth/login", { method: "POST", body: { token: basic.token } });
+  const basicLogin = await signIn(basic.token);
   assert.equal(basicLogin.response.status, 200, JSON.stringify(basicLogin.data));
   const basicCookie = cookieFrom(basicLogin.response, "nj_session");
   app.db.prepare("UPDATE tokens SET ai_usage_count = 20 WHERE id = ?").run(basic.item.id);
@@ -622,7 +941,7 @@ test("Basic AI quota is token-scoped and Full- customization is permission-gated
   assert.equal(blocked.data.code, "ai_quota_exhausted");
 
   const ai = await issueToken({ label: "Unlimited AI", rank: "ai", permissions: ["browse", "bookmarks", "history", "assistant"], features: ["bookmarks", "history", "assistant"] });
-  const aiLogin = await request("/api/auth/login", { method: "POST", body: { token: ai.token } });
+  const aiLogin = await signIn(ai.token);
   assert.equal(aiLogin.response.status, 200, JSON.stringify(aiLogin.data));
   const aiCookie = cookieFrom(aiLogin.response, "nj_session");
   app.db.prepare("UPDATE tokens SET ai_usage_count = 999 WHERE id = ?").run(ai.item.id);
@@ -642,7 +961,7 @@ test("Basic AI quota is token-scoped and Full- customization is permission-gated
   });
   assert.equal(denied.response.status, 403);
   const full = await issueToken({ label: "Customizable", rank: "full-minus" });
-  const fullLogin = await request("/api/auth/login", { method: "POST", body: { token: full.token } });
+  const fullLogin = await signIn(full.token);
   assert.equal(fullLogin.response.status, 200, JSON.stringify(fullLogin.data));
   const fullCookie = cookieFrom(fullLogin.response, "nj_session");
   const saved = await request("/api/settings", {
@@ -676,9 +995,9 @@ test("owner account and site controls are enforced server-side", async () => {
   assert.ok(ticketClaims.expiresAt > Date.now());
   const userInvite = await issueToken({ label: "Managed account", rank: "full-minus" });
   const assistantInvite = await issueToken({ label: "AI control account", rank: "full-minus" });
-  const userLogin = await request("/api/auth/login", { method: "POST", body: { token: userInvite.token } });
+  const userLogin = await signIn(userInvite.token);
   const userCookie = cookieFrom(userLogin.response, "nj_session");
-  const assistantLogin = await request("/api/auth/login", { method: "POST", body: { token: assistantInvite.token } });
+  const assistantLogin = await signIn(assistantInvite.token);
   const assistantCookie = cookieFrom(assistantLogin.response, "nj_session");
 
   const currentAccounts = await request("/api/admin/accounts", { cookie: adminCookie });

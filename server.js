@@ -25,7 +25,7 @@ const destinationRequestAgent = require("testcafe-hammerhead/lib/request-pipelin
 const SESSION_COOKIE = "nj_session";
 const ADMIN_SESSION_COOKIE = "nj_admin";
 const MAX_BODY_BYTES = 64 * 1024;
-const SESSION_MAX_AGE_MS = 12 * 60 * 60 * 1000;
+const SESSION_MAX_AGE_MS = 90 * 24 * 60 * 60 * 1000;
 const SESSION_IDLE_MS = SESSION_MAX_AGE_MS;
 const PERMISSIONS = ["browse", "bookmarks", "history", "settings", "assistant", "games", "support"];
 const FEATURES = ["bookmarks", "history", "settings", "assistant", "games", "support"];
@@ -38,9 +38,9 @@ const DEFAULT_SITE_CONTROLS = {
   assistantEnabled: true,
 };
 const DEFAULT_RANKS = [
-  { id: "basic", label: "Basic", permissions: ["browse", "assistant"], features: ["assistant"] },
-  { id: "basic-plus", label: "Basic+", permissions: ["browse", "bookmarks", "history", "assistant"], features: ["bookmarks", "history", "assistant"] },
-  { id: "ai", label: "AI", permissions: ["browse", "bookmarks", "history", "assistant"], features: ["bookmarks", "history", "assistant"] },
+  { id: "basic", label: "Basic", permissions: ["browse", "assistant", "games"], features: ["assistant", "games"] },
+  { id: "basic-plus", label: "Basic+", permissions: ["browse", "bookmarks", "history", "assistant", "games"], features: ["bookmarks", "history", "assistant", "games"] },
+  { id: "ai", label: "AI", permissions: ["browse", "bookmarks", "history", "assistant", "games"], features: ["bookmarks", "history", "assistant", "games"] },
   { id: "full-minus", label: "Full-", permissions: ["browse", "bookmarks", "history", "settings", "assistant", "games", "support"], features: ["bookmarks", "history", "settings", "assistant", "games", "support"] },
   { id: "owner", label: "Owner", permissions: ["browse", "bookmarks", "history", "settings", "assistant", "games", "support"], features: ["bookmarks", "history", "settings", "assistant", "games", "support"] },
 ];
@@ -302,6 +302,7 @@ function hasRecognizedDomainSuffix(value) {
 function validateOrigin(req) {
   const origin = req.headers.origin;
   if (!origin) return;
+  if (req.headers.authorization?.startsWith("Bearer ")) return;
   let parsed;
   try {
     parsed = new URL(origin);
@@ -337,6 +338,49 @@ function cookieHeader(value, secure, clear = false, name = SESSION_COOKIE) {
   return parts.join("; ");
 }
 
+function withoutFrameAncestors(policy) {
+  if (typeof policy !== "string") return policy;
+  return policy
+    .split(";")
+    .filter((directive) => directive.trim().split(/\s+/, 1)[0].toLowerCase() !== "frame-ancestors")
+    .join(";");
+}
+
+export function withoutUnsupportedAcceptEncoding(value) {
+  if (typeof value !== "string") return value;
+  const encodings = value.split(",").map((encoding) => encoding.trim()).filter(Boolean);
+  const supportedEncodings = encodings.filter((encoding) => encoding.split(";", 1)[0].trim().toLowerCase() !== "zstd");
+  return supportedEncodings.length ? supportedEncodings.join(", ") : "identity";
+}
+
+export function withoutGeneratedMediaAttachment(headers) {
+  const isMedia = (contentType) => /^(?:audio|video)\//i.test(String(contentType ?? ""));
+  if (Array.isArray(headers)) {
+    let contentType = "";
+    for (let index = 0; index < headers.length - 1; index += 2) {
+      if (String(headers[index]).toLowerCase() === "content-type") contentType = headers[index + 1];
+    }
+    if (!isMedia(contentType)) return headers;
+    const filtered = [];
+    for (let index = 0; index < headers.length - 1; index += 2) {
+      if (
+        String(headers[index]).toLowerCase() === "content-disposition" &&
+        String(headers[index + 1]).trim().toLowerCase() === "attachment;"
+      ) continue;
+      filtered.push(headers[index], headers[index + 1]);
+    }
+    return filtered;
+  }
+  if (!headers || typeof headers !== "object") return headers;
+  const contentTypeKey = Object.keys(headers).find((key) => key.toLowerCase() === "content-type");
+  const dispositionKey = Object.keys(headers).find((key) => key.toLowerCase() === "content-disposition");
+  if (!isMedia(contentTypeKey && headers[contentTypeKey]) || !dispositionKey ||
+      String(headers[dispositionKey]).trim().toLowerCase() !== "attachment;") return headers;
+  const filtered = { ...headers };
+  delete filtered[dispositionKey];
+  return filtered;
+}
+
 function createDatabase(path) {
   const db = new DatabaseSync(path, { timeout: 5000 });
   db.exec("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;");
@@ -354,6 +398,7 @@ function createDatabase(path) {
     CREATE TABLE IF NOT EXISTS accounts (
       id TEXT PRIMARY KEY,
       label TEXT NOT NULL,
+      username TEXT,
       settings_json TEXT NOT NULL,
       permissions_json TEXT NOT NULL,
       features_json TEXT NOT NULL,
@@ -441,6 +486,26 @@ function createDatabase(path) {
       UNIQUE(account_id, name)
     );
     CREATE INDEX IF NOT EXISTS project_areas_by_account ON project_areas(account_id, created_at DESC);
+    CREATE TABLE IF NOT EXISTS friend_requests (
+      id TEXT PRIMARY KEY,
+      requester_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+      recipient_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+      status TEXT NOT NULL CHECK (status IN ('pending', 'accepted')),
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      CHECK (requester_id != recipient_id),
+      UNIQUE(requester_id, recipient_id)
+    );
+    CREATE INDEX IF NOT EXISTS friend_requests_by_recipient ON friend_requests(recipient_id, status, created_at DESC);
+    CREATE TABLE IF NOT EXISTS direct_messages (
+      id TEXT PRIMARY KEY,
+      sender_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+      recipient_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+      body TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      CHECK (sender_id != recipient_id)
+    );
+    CREATE INDEX IF NOT EXISTS direct_messages_by_pair_time ON direct_messages(sender_id, recipient_id, created_at DESC, id DESC);
     CREATE TABLE IF NOT EXISTS site_settings (
       key TEXT PRIMARY KEY,
       value_json TEXT NOT NULL,
@@ -461,6 +526,7 @@ function createDatabase(path) {
   }
   const accountColumns = new Set(db.prepare("PRAGMA table_info(accounts)").all().map((column) => column.name));
   if (!accountColumns.has("rank")) db.exec("ALTER TABLE accounts ADD COLUMN rank TEXT NOT NULL DEFAULT 'standard'");
+  if (!accountColumns.has("username")) db.exec("ALTER TABLE accounts ADD COLUMN username TEXT");
   const tokenColumns = new Set(db.prepare("PRAGMA table_info(tokens)").all().map((column) => column.name));
   if (!tokenColumns.has("rank")) db.exec("ALTER TABLE tokens ADD COLUMN rank TEXT NOT NULL DEFAULT 'standard'");
   if (!tokenColumns.has("ai_usage_count")) db.exec("ALTER TABLE tokens ADD COLUMN ai_usage_count INTEGER NOT NULL DEFAULT 0");
@@ -551,6 +617,35 @@ function createDatabase(path) {
     const createdAt = new Date().toISOString();
     for (const account of db.prepare("SELECT id FROM accounts").all()) createDefaultProjectAreas(db, account.id, createdAt);
     db.prepare("INSERT INTO schema_migrations(version, applied_at) VALUES (8, CURRENT_TIMESTAMP)").run();
+  }
+  if (!db.prepare("SELECT version FROM schema_migrations WHERE version = 9").get()) {
+    const now = new Date();
+    const nowIso = now.toISOString();
+    const expiresAt = new Date(now.getTime() + SESSION_MAX_AGE_MS).toISOString();
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      for (const rank of DEFAULT_RANKS.filter(({ id }) => ["basic", "basic-plus", "ai"].includes(id))) {
+        db.prepare("UPDATE ranks SET permissions_json = ?, features_json = ? WHERE id = ?")
+          .run(JSON.stringify(rank.permissions), JSON.stringify(rank.features), rank.id);
+        db.prepare("UPDATE accounts SET permissions_json = ?, features_json = ? WHERE rank = ? AND revoked_at IS NULL")
+          .run(JSON.stringify(rank.permissions), JSON.stringify(rank.features), rank.id);
+        db.prepare("UPDATE tokens SET permissions_json = ? WHERE rank = ? AND revoked_at IS NULL")
+          .run(JSON.stringify(rank.permissions), rank.id);
+      }
+      db.prepare("UPDATE sessions SET expires_at = ? WHERE expires_at > ?").run(expiresAt, nowIso);
+      db.prepare("INSERT INTO schema_migrations(version, applied_at) VALUES (9, CURRENT_TIMESTAMP)").run();
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+  if (!db.prepare("SELECT version FROM schema_migrations WHERE version = 10").get()) {
+    db.exec(`
+      CREATE UNIQUE INDEX IF NOT EXISTS accounts_username_unique
+        ON accounts(username COLLATE NOCASE) WHERE username IS NOT NULL;
+      INSERT INTO schema_migrations(version, applied_at) VALUES (10, CURRENT_TIMESTAMP);
+    `);
   }
   return db;
 }
@@ -865,20 +960,8 @@ export async function createApp(options = {}) {
     secureCookie: options.secureCookie ?? env("NODE_ENV", "development") === "production",
     serverVersion: "1.0.0",
   };
-  const proxyHost = options.proxyHost ?? env("RAMMERHEAD_HOST", env("SCRAMJET_HOST", "127.0.0.1"));
-  const configuredProxyOrigin = options.proxyOrigin ?? env("RAMMERHEAD_ORIGIN", env("SCRAMJET_ORIGIN", ""));
   const configuredAppOrigin = options.appOrigin ?? env("APP_ORIGIN", "");
-  const configuredDashboardOrigins = options.dashboardOrigins ?? env("DASHBOARD_ORIGINS", "");
-  const dashboardOriginsInput = Array.isArray(configuredDashboardOrigins)
-    ? configuredDashboardOrigins
-    : String(configuredDashboardOrigins).split(",");
-  const dashboardOrigins = new Set(dashboardOriginsInput.map((origin) => String(origin).trim()).filter(Boolean));
-  const proxyPort = Number(options.proxyPort ?? env("RAMMERHEAD_PORT", env("SCRAMJET_PORT", "4174")));
-  if (!Number.isInteger(proxyPort) || proxyPort < 0 || proxyPort > 65535) {
-    db.close();
-    throw new Error("RAMMERHEAD_PORT must be an integer from 0 to 65535.");
-  }
-  for (const [name, value] of [["RAMMERHEAD_ORIGIN", configuredProxyOrigin], ["APP_ORIGIN", configuredAppOrigin]]) {
+  for (const [name, value] of [["APP_ORIGIN", configuredAppOrigin]]) {
     if (!value) continue;
     try {
       const parsed = new URL(value);
@@ -888,25 +971,55 @@ export async function createApp(options = {}) {
       throw new Error(`${name} must be a bare HTTP(S) origin with no path.`);
     }
   }
-  for (const value of dashboardOrigins) {
-    try {
-      const parsed = new URL(value);
-      if (!["http:", "https:"].includes(parsed.protocol) || parsed.origin !== value || value === "*") throw new Error();
-      if ((options.production ?? env("NODE_ENV", "development") === "production") && parsed.protocol !== "https:") throw new Error();
-    } catch {
-      db.close();
-      throw new Error("DASHBOARD_ORIGINS must be a comma-separated list of exact HTTP(S) origins; production origins must use HTTPS.");
-    }
-  }
-  if ((options.production ?? env("NODE_ENV", "development") === "production") && !configuredProxyOrigin) {
-    db.close();
-    throw new Error("RAMMERHEAD_ORIGIN must be configured for production so proxied sites stay isolated from the application origin.");
-  }
   if ((options.production ?? env("NODE_ENV", "development") === "production") && !configuredAppOrigin) {
     db.close();
-    throw new Error("APP_ORIGIN must be configured for production to restrict the Rammerhead shell's embedding origin.");
+    throw new Error("APP_ORIGIN must be configured for production.");
   }
-  const proxyOrigin = () => configuredProxyOrigin || `http://${proxyHost}:${proxyServer?.address()?.port ?? proxyPort}`;
+  const requestOrigin = (req = null) => {
+    if (req?.headers.host) {
+      let protocol = req.socket.encrypted ? "https:" : "http:";
+      const forwardedProtocol = Array.isArray(req.headers["x-forwarded-proto"])
+        ? req.headers["x-forwarded-proto"][0]
+        : req.headers["x-forwarded-proto"]?.split(",")[0]?.trim();
+      const cloudflareVisitor = req.headers["cf-visitor"];
+      if (typeof cloudflareVisitor === "string") {
+        try {
+          const scheme = JSON.parse(cloudflareVisitor).scheme;
+          if (scheme === "http" || scheme === "https") protocol = `${scheme}:`;
+        } catch {
+          // Ignore malformed reverse-proxy metadata and use the socket protocol.
+        }
+      } else if (forwardedProtocol === "http" || forwardedProtocol === "https") {
+        protocol = `${forwardedProtocol}:`;
+      }
+      const requestUrl = new URL(`${protocol}//${req.headers.host}`);
+      return requestUrl.origin;
+    }
+    const port = server?.address()?.port ?? Number(env("PORT", "4173"));
+    return `http://127.0.0.1:${port}`;
+  };
+  const proxyOrigin = (req = null) => requestOrigin(req);
+  const gameOrigin = (req = null) => requestOrigin(req);
+  const appOrigin = (req = null) => {
+    if (configuredAppOrigin) return configuredAppOrigin;
+    return requestOrigin(req);
+  };
+  function validatedEmbedOrigin(value, req) {
+    if (!value) throw new HttpError(400, "The Nightjar application origin is required.", "invalid_app_origin");
+    let parsed;
+    try {
+      parsed = new URL(value);
+      if (!["http:", "https:"].includes(parsed.protocol) || parsed.origin !== value) throw new Error();
+    } catch {
+      throw new HttpError(400, "The Nightjar application origin is invalid.", "invalid_app_origin");
+    }
+    if (configuredAppOrigin && parsed.origin === configuredAppOrigin) return parsed.origin;
+    const requestUrl = new URL(requestOrigin(req));
+    const sameHost = parsed.hostname.toLowerCase() === requestUrl.hostname.toLowerCase() &&
+      parsed.port === requestUrl.port;
+    if (!sameHost) throw new HttpError(403, "The Nightjar application origin is not allowed.", "origin_rejected");
+    return parsed.origin;
+  }
   const rammerheadSessions = new Map();
   const proxySockets = new Map();
   const proxyMaintenanceTimer = setInterval(() => {
@@ -928,23 +1041,46 @@ export async function createApp(options = {}) {
   proxyMaintenanceTimer.unref();
   let server;
   let proxyServer;
+  let gameServer;
   const rammerhead = new RammerheadProxy({
-    bindingAddress: proxyHost,
-    port: proxyPort,
+    bindingAddress: options.host ?? env("HOST", "127.0.0.1"),
+    port: Number(options.port ?? env("PORT", "4173")),
     crossDomainPort: null,
     dontListen: true,
+    disableLocalStorageSync: true,
     disableHttp2: true,
     jsCache: new RammerheadJSMemCache(50 * 1024 * 1024),
     getServerInfo(req) {
-      const requestOrigin = new URL(`${req.socket.encrypted ? "https" : "http"}://${req.headers.host}`);
-      const externalOrigin = configuredProxyOrigin ? new URL(configuredProxyOrigin) : requestOrigin;
+      const requestUrl = new URL(requestOrigin(req));
       return {
-        hostname: externalOrigin.hostname,
-        port: Number(externalOrigin.port || (externalOrigin.protocol === "https:" ? 443 : 80)),
-        crossDomainPort: Number(externalOrigin.port || (externalOrigin.protocol === "https:" ? 443 : 80)),
-        protocol: externalOrigin.protocol,
+        hostname: requestUrl.hostname,
+        port: Number(requestUrl.port || (requestUrl.protocol === "https:" ? 443 : 80)),
+        crossDomainPort: Number(requestUrl.port || (requestUrl.protocol === "https:" ? 443 : 80)),
+        protocol: requestUrl.protocol,
       };
     },
+  });
+  Object.assign(rammerhead.rewriteServerHeaders, {
+    "x-frame-options": null,
+    "content-security-policy": withoutFrameAncestors,
+    "x-content-security-policy": withoutFrameAncestors,
+    "x-webkit-csp": withoutFrameAncestors,
+  });
+  rammerhead.addToOnRequestPipeline((req, _res, _serverInfo, isRoute) => {
+    if (!isRoute && req.headers["accept-encoding"]) {
+      req.headers["accept-encoding"] = withoutUnsupportedAcceptEncoding(req.headers["accept-encoding"]);
+    }
+  });
+  rammerhead.addToOnRequestPipeline((req, res, _serverInfo, isRoute) => {
+    if (isRoute) return;
+    const originalWriteHead = res.writeHead;
+    res.writeHead = function (...args) {
+      const headersIndex = args.length >= 3 || typeof args[1] === "string" ? 2 : 1;
+      if (args[headersIndex] && typeof args[headersIndex] === "object") {
+        args[headersIndex] = withoutGeneratedMediaAttachment(args[headersIndex]);
+      }
+      return originalWriteHead.apply(this, args);
+    };
   });
   const aiModel = options.aiModel ?? env("OLLAMA_MODEL", "qwen3:4b");
   const ollamaFetch = options.ollamaFetch ?? globalThis.fetch;
@@ -1074,13 +1210,19 @@ export async function createApp(options = {}) {
     }
   }
 
-  function requestSession(req) {
+  function requestSession(req, res) {
     const cookies = parseCookies(req.headers.cookie);
     const adminPath = req.url?.startsWith("/api/admin/");
     const dashboardPath = req.url?.startsWith("/api/owner/dashboard/");
+    const authorization = req.headers.authorization;
+    const bearer = typeof authorization === "string" ? /^Bearer ([A-Za-z0-9_-]{32,128})$/i.exec(authorization) : null;
     const candidates = adminPath || dashboardPath
       ? [[ADMIN_SESSION_COOKIE, cookies[ADMIN_SESSION_COOKIE]], [SESSION_COOKIE, cookies[SESSION_COOKIE]]]
       : [[SESSION_COOKIE, cookies[SESSION_COOKIE]]];
+    if (authorization) {
+      if (!bearer) return null;
+      candidates.unshift(["bearer", bearer[1]]);
+    }
     for (const [cookieName, raw] of candidates) {
       if (!raw || raw.length < 32 || raw.length > 128) continue;
       const session = db.prepare("SELECT * FROM sessions WHERE session_hash = ?").get(hash(raw));
@@ -1094,7 +1236,7 @@ export async function createApp(options = {}) {
       if (session.principal === "user") {
         const account = db.prepare("SELECT * FROM accounts WHERE id = ?").get(session.account_id);
         const token = db.prepare("SELECT * FROM tokens WHERE id = ?").get(session.token_id);
-        if (!account || account.revoked_at || !token || token.revoked_at || (token.expires_at && Date.parse(token.expires_at) <= now)) {
+        if (!account || account.revoked_at || !token || token.revoked_at) {
           db.prepare("DELETE FROM sessions WHERE id = ?").run(session.id);
           closeProxySession(session.id);
           continue;
@@ -1102,8 +1244,14 @@ export async function createApp(options = {}) {
         session.account = account;
         session.token = token;
       }
-      session.cookieName = cookieName;
-      db.prepare("UPDATE sessions SET last_seen_at = ? WHERE id = ?").run(new Date(now).toISOString(), session.id);
+      session.authMode = cookieName === "bearer" ? "bearer" : "cookie";
+      session.cookieName = cookieName === "bearer" ? (adminPath ? ADMIN_SESSION_COOKIE : SESSION_COOKIE) : cookieName;
+      session.requestToken = raw;
+      const nowIso = new Date(now).toISOString();
+      const expiresAt = new Date(now + SESSION_MAX_AGE_MS).toISOString();
+      db.prepare("UPDATE sessions SET last_seen_at = ?, expires_at = ? WHERE id = ?")
+        .run(nowIso, expiresAt, session.id);
+      if (session.authMode === "cookie") res.setHeader("Set-Cookie", cookieHeader(raw, config.secureCookie, false, cookieName));
       return session;
     }
     return null;
@@ -1176,7 +1324,7 @@ export async function createApp(options = {}) {
   }
 
   function rammerheadSessionId(req, requestUrl) {
-    const direct = parseProxyUrl(new URL(req.url, proxyOrigin()).href)?.sessionId;
+    const direct = parseProxyUrl(new URL(req.url, proxyOrigin(req)).href)?.sessionId;
     if (direct) return direct;
     const querySessionId = requestUrl.searchParams.get("sessionId") ?? requestUrl.searchParams.get("id");
     if (querySessionId && /^[a-f0-9]{32}$/i.test(querySessionId)) return querySessionId;
@@ -1194,14 +1342,13 @@ export async function createApp(options = {}) {
     const record = engineSessionId && rammerheadSessions.get(engineSessionId);
     if (!record || record.expiresAt <= Date.now()) return null;
     const session = db.prepare(`SELECT s.id, s.last_seen_at, s.expires_at, a.revoked_at, a.permissions_json,
-      t.revoked_at AS token_revoked_at, t.expires_at AS token_expires_at
+      t.revoked_at AS token_revoked_at
       FROM sessions s JOIN accounts a ON a.id = s.account_id JOIN tokens t ON t.id = s.token_id
       WHERE s.id = ? AND s.principal = 'user'`).get(record.userSessionId);
     if (
       !session ||
       session.revoked_at ||
       session.token_revoked_at ||
-      (session.token_expires_at && Date.parse(session.token_expires_at) <= Date.now()) ||
       Date.parse(session.expires_at) <= Date.now() ||
       Date.now() - Date.parse(session.last_seen_at) > SESSION_IDLE_MS ||
       !safeJson(session.permissions_json, []).includes("browse") ||
@@ -1258,7 +1405,7 @@ export async function createApp(options = {}) {
     const method = req.method;
     const ip = clientAddress(req);
     const cookies = parseCookies(req.headers.cookie);
-    const session = requestSession(req);
+    const session = requestSession(req, res);
     const siteControls = getSiteControls();
     if (siteControls.maintenanceMode && !path.startsWith("/api/admin/") && path !== "/api/owner/dashboard/tokens" && path !== "/api/auth/logout") {
       throw new HttpError(503, "Nightjar is temporarily in maintenance mode. Please try again later.", "maintenance_mode");
@@ -1266,9 +1413,6 @@ export async function createApp(options = {}) {
 
     if (method === "GET" && path === "/api/owner/dashboard/tokens") {
       requireOwner(session);
-      if (req.headers.origin && !dashboardOrigins.has(req.headers.origin)) {
-        throw new HttpError(403, "This dashboard origin is not configured.", "origin_rejected");
-      }
       const rows = db.prepare(`SELECT id, rank, expires_at, usage_limit, usage_count, ai_usage_count, created_at, revoked_at
         FROM tokens ORDER BY created_at DESC LIMIT 500`).all();
       const now = Date.now();
@@ -1301,13 +1445,13 @@ export async function createApp(options = {}) {
     }
 
     if (method === "POST" && path === "/api/auth/login") {
-      validateOrigin(req);
       consumeLimit(`user:${ip}`, userLoginLimit, 5 * 60_000);
       const body = await readBody(req);
+      if (body.apiMode !== true) validateOrigin(req);
       if (typeof body.token !== "string" || body.token.length < 24 || body.token.length > 128) {
         throw new HttpError(401, "Invitation token was not recognized.", "invalid_token");
       }
-      const token = db.prepare(`SELECT t.*, a.revoked_at AS account_revoked, a.label AS account_label
+      const token = db.prepare(`SELECT t.*, a.revoked_at AS account_revoked, a.label AS account_label, a.username AS account_username
         FROM tokens t JOIN accounts a ON a.id = t.account_id WHERE t.token_hash = ?`).get(hash(body.token));
       if (!token || token.revoked_at || token.account_revoked || (token.expires_at && Date.parse(token.expires_at) <= Date.now())) {
         throw new HttpError(401, "Invitation token is invalid, expired, or revoked.", "invalid_token");
@@ -1315,32 +1459,167 @@ export async function createApp(options = {}) {
       if (token.usage_limit !== null && token.usage_count >= token.usage_limit) {
         throw new HttpError(401, "This invitation was already redeemed. The signed-in browser uses its secure session cookie; ask the owner for a replacement if you need to sign in again.", "usage_limit_reached");
       }
-      const live = db.prepare("SELECT * FROM sessions WHERE account_id = ? AND principal = 'user'").all(token.account_id)
-        .filter((session) => Date.now() - Date.parse(session.last_seen_at) <= SESSION_IDLE_MS && Date.parse(session.expires_at) > Date.now());
-      if (live.length > 0) {
-        revokeAccount(token.account_id, "concurrent_sign_in", ip);
-        audit(db, "system", "token.concurrent_use", token.id, { sessionCount: live.length }, ip);
-        throw new HttpError(409, "This account was signed in elsewhere. Its access has been revoked; ask the owner for a replacement invitation.", "concurrent_session");
+      const username = typeof body.username === "string" ? body.username.trim() : "";
+      if (!token.account_username && !username) {
+        throw new HttpError(409, "Choose a username to finish signing in.", "username_required");
       }
-      db.prepare("DELETE FROM sessions WHERE account_id = ?").run(token.account_id);
+      if (username && !/^[a-zA-Z0-9_]{3,24}$/.test(username)) {
+        throw new HttpError(400, "Usernames must be 3–24 characters and use only letters, numbers, or underscores.", "invalid_username");
+      }
+      if (token.account_username && username && token.account_username.toLowerCase() !== username.toLowerCase()) {
+        throw new HttpError(409, "This account already has a username, which cannot be changed.", "username_immutable");
+      }
+      if (!token.account_username) {
+        try {
+          db.prepare("UPDATE accounts SET username = ? WHERE id = ? AND username IS NULL").run(username, token.account_id);
+        } catch (error) {
+          if (error.errcode === 2067 && error.message === "UNIQUE constraint failed: accounts.username") {
+            throw new HttpError(409, "That username is already taken. Choose another one.", "username_taken");
+          }
+          throw error;
+        }
+      }
       db.prepare("UPDATE tokens SET usage_count = usage_count + 1, last_used_at = ? WHERE id = ?")
         .run(new Date().toISOString(), token.id);
       const session = newSession("user", token.account_id, token.id);
       audit(db, token.account_label, "session.created", token.account_id, { tokenId: token.id }, ip);
       const account = db.prepare("SELECT * FROM accounts WHERE id = ?").get(token.account_id);
-      sendJson(res, 200, {
+      const response = {
         authenticated: true,
         account: {
           id: account.id,
           label: account.label,
+          username: account.username,
           rank: account.rank,
           settings: safeJson(account.settings_json, DEFAULT_SETTINGS),
           permissions: safeJson(account.permissions_json, []),
           features: safeJson(account.features_json, []),
         },
         csrf: session.csrf,
-      }, { "Set-Cookie": cookieHeader(session.raw, config.secureCookie) });
+      };
+      if (body.apiMode === true) response.sessionToken = session.raw;
+      sendJson(res, 200, response, body.apiMode === true ? {} : { "Set-Cookie": cookieHeader(session.raw, config.secureCookie) });
       return;
+    }
+
+    if (method === "POST" && path === "/api/account/username") {
+      const user = requirePrincipal(session, "user");
+      requireCsrf(req, user);
+      const body = await readBody(req);
+      const username = typeof body.username === "string" ? body.username.trim() : "";
+      if (!/^[a-zA-Z0-9_]{3,24}$/.test(username)) {
+        throw new HttpError(400, "Usernames must be 3–24 characters and use only letters, numbers, or underscores.", "invalid_username");
+      }
+      if (user.account.username) throw new HttpError(409, "This account already has a username, which cannot be changed.", "username_immutable");
+      try {
+        const result = db.prepare("UPDATE accounts SET username = ? WHERE id = ? AND username IS NULL").run(username, user.account_id);
+        if (!result.changes) throw new HttpError(409, "This account already has a username, which cannot be changed.", "username_immutable");
+      } catch (error) {
+        if (error.errcode === 2067 && error.message === "UNIQUE constraint failed: accounts.username") {
+          throw new HttpError(409, "That username is already taken. Choose another one.", "username_taken");
+        }
+        throw error;
+      }
+      sendJson(res, 200, { username });
+      return;
+    }
+
+    if (path === "/api/social" || path.startsWith("/api/social/")) {
+      const user = requirePrincipal(session, "user");
+      const accountId = user.account_id;
+      if (method !== "GET") requireCsrf(req, user);
+      if (method === "GET" && path === "/api/social") {
+        const incoming = db.prepare(`SELECT r.id, a.id AS account_id, a.username, r.created_at
+          FROM friend_requests r JOIN accounts a ON a.id = r.requester_id
+          WHERE r.recipient_id = ? AND r.status = 'pending' ORDER BY r.created_at DESC`).all(accountId);
+        const outgoing = db.prepare(`SELECT r.id, a.id AS account_id, a.username, r.created_at
+          FROM friend_requests r JOIN accounts a ON a.id = r.recipient_id
+          WHERE r.requester_id = ? AND r.status = 'pending' ORDER BY r.created_at DESC`).all(accountId);
+        const friends = db.prepare(`SELECT a.id, a.username, r.updated_at AS since
+          FROM friend_requests r JOIN accounts a
+            ON a.id = CASE WHEN r.requester_id = ? THEN r.recipient_id ELSE r.requester_id END
+          WHERE (r.requester_id = ? OR r.recipient_id = ?) AND r.status = 'accepted'
+          ORDER BY a.username COLLATE NOCASE`).all(accountId, accountId, accountId);
+        sendJson(res, 200, { incoming, outgoing, friends });
+        return;
+      }
+
+      if (method === "POST" && path === "/api/social/requests") {
+        consumeLimit(`social-request:${accountId}`, 20, 60_000);
+        const body = await readBody(req);
+        const username = typeof body.username === "string" ? body.username.trim() : "";
+        if (!/^[a-zA-Z0-9_]{3,24}$/.test(username)) throw new HttpError(400, "Enter a valid username.", "invalid_username");
+        const target = db.prepare("SELECT id, username FROM accounts WHERE username = ? COLLATE NOCASE AND revoked_at IS NULL").get(username);
+        if (!target) throw new HttpError(404, "No active account has that username.", "user_not_found");
+        if (target.id === accountId) throw new HttpError(400, "You cannot add yourself as a friend.", "self_friend_request");
+        const existing = db.prepare(`SELECT id, status, requester_id, recipient_id FROM friend_requests
+          WHERE (requester_id = ? AND recipient_id = ?) OR (requester_id = ? AND recipient_id = ?)`)
+          .get(accountId, target.id, target.id, accountId);
+        if (existing) throw new HttpError(409, existing.status === "accepted" ? "You are already friends." : "A friend request between these accounts already exists.", "request_exists");
+        const id = randomUUID();
+        const now = new Date().toISOString();
+        db.prepare("INSERT INTO friend_requests(id, requester_id, recipient_id, status, created_at, updated_at) VALUES (?, ?, ?, 'pending', ?, ?)")
+          .run(id, accountId, target.id, now, now);
+        audit(db, user.account.label, "social.friend_request_sent", target.id, {}, ip);
+        sendJson(res, 201, { id, username: target.username, createdAt: now });
+        return;
+      }
+
+      const requestMatch = path.match(/^\/api\/social\/requests\/([0-9a-f-]{36})$/i);
+      if (requestMatch && method === "POST") {
+        const request = db.prepare("SELECT * FROM friend_requests WHERE id = ? AND recipient_id = ? AND status = 'pending'")
+          .get(requestMatch[1], accountId);
+        if (!request) throw new HttpError(404, "Incoming friend request not found.", "not_found");
+        const now = new Date().toISOString();
+        db.prepare("UPDATE friend_requests SET status = 'accepted', updated_at = ? WHERE id = ?").run(now, request.id);
+        audit(db, user.account.label, "social.friend_request_accepted", request.requester_id, {}, ip);
+        sendJson(res, 200, { ok: true });
+        return;
+      }
+      if (requestMatch && method === "DELETE") {
+        const result = db.prepare(`DELETE FROM friend_requests WHERE id = ? AND status = 'pending'
+          AND (requester_id = ? OR recipient_id = ?)`).run(requestMatch[1], accountId, accountId);
+        if (!result.changes) throw new HttpError(404, "Pending friend request not found.", "not_found");
+        sendJson(res, 200, { ok: true });
+        return;
+      }
+
+      const friendMatch = path.match(/^\/api\/social\/friends\/([0-9a-f-]{36})$/i);
+      if (friendMatch && method === "DELETE") {
+        const result = db.prepare(`DELETE FROM friend_requests WHERE status = 'accepted'
+          AND ((requester_id = ? AND recipient_id = ?) OR (requester_id = ? AND recipient_id = ?))`)
+          .run(accountId, friendMatch[1], friendMatch[1], accountId);
+        if (!result.changes) throw new HttpError(404, "Friend not found.", "not_found");
+        sendJson(res, 200, { ok: true });
+        return;
+      }
+
+      const messagesMatch = path.match(/^\/api\/social\/friends\/([0-9a-f-]{36})\/messages$/i);
+      if (messagesMatch && (method === "GET" || method === "POST")) {
+        const friendId = messagesMatch[1];
+        const friendship = db.prepare(`SELECT id FROM friend_requests WHERE status = 'accepted'
+          AND ((requester_id = ? AND recipient_id = ?) OR (requester_id = ? AND recipient_id = ?))`)
+          .get(accountId, friendId, friendId, accountId);
+        if (!friendship) throw new HttpError(403, "Messages are available only between accepted friends.", "friendship_required");
+        if (method === "GET") {
+          const messages = db.prepare(`SELECT id, sender_id AS senderId, recipient_id AS recipientId, body, created_at AS createdAt
+            FROM direct_messages WHERE (sender_id = ? AND recipient_id = ?) OR (sender_id = ? AND recipient_id = ?)
+            ORDER BY created_at DESC, id DESC LIMIT 100`).all(accountId, friendId, friendId, accountId).reverse();
+          sendJson(res, 200, { messages });
+          return;
+        }
+        consumeLimit(`social-message:${accountId}`, 30, 60_000);
+        const body = await readBody(req);
+        const message = typeof body.message === "string" ? body.message.trim() : "";
+        if (!message || message.length > 2000) throw new HttpError(400, "Messages must be between 1 and 2,000 characters.", "invalid_message");
+        const id = randomUUID();
+        const createdAt = new Date().toISOString();
+        db.prepare("INSERT INTO direct_messages(id, sender_id, recipient_id, body, created_at) VALUES (?, ?, ?, ?, ?)")
+          .run(id, accountId, friendId, message, createdAt);
+        sendJson(res, 201, { id, senderId: accountId, recipientId: friendId, body: message, createdAt });
+        return;
+      }
+      throw new HttpError(404, "Social endpoint not found.", "not_found");
     }
 
     if (method === "POST" && path === "/api/feedback") {
@@ -1486,9 +1765,9 @@ export async function createApp(options = {}) {
     }
 
     if (method === "POST" && path === "/api/admin/login") {
-      validateOrigin(req);
       consumeLimit(`admin:${ip}`, 6, 10 * 60_000);
       const body = await readBody(req);
+      if (body.apiMode !== true) validateOrigin(req);
       const currentOwner = db.prepare("SELECT * FROM owner WHERE id = 1").get();
       const passwordOk = typeof body.password === "string" && await verifyPassword(body.password, currentOwner.password_hash);
       const totpOk = !currentOwner.totp_enabled || (typeof body.totp === "string" && verifyTotp(totpSecret, body.totp));
@@ -1498,7 +1777,9 @@ export async function createApp(options = {}) {
       }
       const session = newSession("admin", null, null);
       audit(db, "owner", "admin.session_created", "owner", {}, ip);
-      sendJson(res, 200, { authenticated: true, csrf: session.csrf }, { "Set-Cookie": cookieHeader(session.raw, config.secureCookie, false, ADMIN_SESSION_COOKIE) });
+      const response = { authenticated: true, csrf: session.csrf };
+      if (body.apiMode === true) response.sessionToken = session.raw;
+      sendJson(res, 200, response, body.apiMode === true ? {} : { "Set-Cookie": cookieHeader(session.raw, config.secureCookie, false, ADMIN_SESSION_COOKIE) });
       return;
     }
 
@@ -1515,7 +1796,21 @@ export async function createApp(options = {}) {
         userSessionId: user.id,
         expiresAt: Date.now() + SESSION_MAX_AGE_MS,
       });
-      sendJson(res, 200, { sessionId: engineSessionId, proxyOrigin: proxyOrigin() });
+      sendJson(res, 200, {
+        sessionId: engineSessionId,
+        proxyOrigin: proxyOrigin(req),
+        gameOrigin: gameOrigin(req),
+      });
+      return;
+    }
+
+    if (method === "GET" && path === "/api/browser/config") {
+      const user = requirePrincipal(session, "user");
+      requirePermission(user, "browse");
+      sendJson(res, 200, {
+        proxyOrigin: proxyOrigin(req),
+        gameOrigin: gameOrigin(req),
+      });
       return;
     }
 
@@ -1529,12 +1824,13 @@ export async function createApp(options = {}) {
         account: {
           id: session.account.id,
           label: session.account.label,
+          username: session.account.username,
           rank: session.account.rank,
           settings: safeJson(session.account.settings_json, DEFAULT_SETTINGS),
           permissions: safeJson(session.account.permissions_json, []),
           features: safeJson(session.account.features_json, []),
         },
-        csrf: csrfForSession(cookies[SESSION_COOKIE]),
+        csrf: csrfForSession(session.requestToken),
       });
       return;
     }
@@ -1546,10 +1842,11 @@ export async function createApp(options = {}) {
       }
       sendJson(res, 200, {
         authenticated: true,
-        csrf: csrfForSession(cookies[SESSION_COOKIE]),
+        csrf: csrfForSession(session.requestToken),
         account: {
           id: session.account.id,
           label: session.account.label,
+          username: session.account.username,
           rank: session.account.rank,
           settings: safeJson(session.account.settings_json, DEFAULT_SETTINGS),
           permissions: safeJson(session.account.permissions_json, []),
@@ -1645,7 +1942,7 @@ export async function createApp(options = {}) {
       requireCsrf(req, admin);
       db.prepare("DELETE FROM sessions WHERE id = ?").run(admin.id);
       audit(db, "owner", "admin.session_ended", "owner", {}, ip);
-      sendJson(res, 200, { ok: true }, { "Set-Cookie": cookieHeader("", config.secureCookie, true, admin.cookieName) });
+      sendJson(res, 200, { ok: true }, admin.authMode === "cookie" ? { "Set-Cookie": cookieHeader("", config.secureCookie, true, admin.cookieName) } : {});
       return;
     }
 
@@ -1653,7 +1950,7 @@ export async function createApp(options = {}) {
       const ownerSession = requireOwner(session);
       sendJson(res, 200, {
         authenticated: true,
-        csrf: csrfForSession(cookies[ownerSession.cookieName]),
+        csrf: csrfForSession(ownerSession.requestToken),
         twoFactorEnabled: Boolean(db.prepare("SELECT totp_enabled FROM owner WHERE id = 1").get().totp_enabled),
       });
       return;
@@ -1709,7 +2006,7 @@ export async function createApp(options = {}) {
       db.prepare("DELETE FROM sessions WHERE id = ?").run(user.id);
       closeProxySession(user.id);
       audit(db, user.account.label, "session.ended", user.account_id, {}, ip);
-      sendJson(res, 200, { ok: true }, { "Set-Cookie": cookieHeader("", config.secureCookie, true) });
+      sendJson(res, 200, { ok: true }, user.authMode === "cookie" ? { "Set-Cookie": cookieHeader("", config.secureCookie, true) } : {});
       return;
     }
 
@@ -1910,6 +2207,32 @@ export async function createApp(options = {}) {
         revokedAt: null,
         status: "active",
       } });
+      return;
+    }
+
+    const renewMatch = path.match(/^\/api\/admin\/tokens\/([0-9a-f-]{36})\/renew$/i);
+    if (method === "POST" && renewMatch) {
+      const admin = requireOwner(session);
+      requireCsrf(req, admin);
+      if (!siteControls.invitationsEnabled) throw new HttpError(423, "New invitations are disabled by the owner.", "invitations_disabled");
+      const row = db.prepare(`SELECT t.*, a.label AS account_label, a.revoked_at AS account_revoked
+        FROM tokens t JOIN accounts a ON a.id = t.account_id WHERE t.id = ?`).get(renewMatch[1]);
+      if (!row) throw new HttpError(404, "Invitation not found.", "not_found");
+      if (row.revoked_at || row.account_revoked) throw new HttpError(409, "Revoked access cannot be renewed.", "token_revoked");
+
+      const value = randomBytes(32).toString("base64url");
+      const now = new Date();
+      const nowIso = now.toISOString();
+      const expiresAt = row.expires_at
+        ? new Date(now.getTime() + SESSION_MAX_AGE_MS).toISOString()
+        : null;
+      db.prepare(`UPDATE tokens SET token_hash = ?, expires_at = ?, usage_limit = 1,
+        usage_count = 0, last_used_at = NULL, created_at = ? WHERE id = ?`)
+        .run(hash(value), expiresAt, nowIso, row.id);
+      const renewed = db.prepare(`SELECT t.*, a.label AS account_label FROM tokens t
+        JOIN accounts a ON a.id = t.account_id WHERE t.id = ?`).get(row.id);
+      audit(db, "owner", "token.renewed", row.id, { accountId: row.account_id, expiresAt }, ip);
+      sendJson(res, 200, { token: value, item: rowToToken(renewed) });
       return;
     }
 
@@ -2246,7 +2569,7 @@ export async function createApp(options = {}) {
     throw new HttpError(404, "API route not found.", "not_found");
   }
 
-  function securityHeaders(res, isHtml = false, isAdmin = false) {
+  function securityHeaders(res, isHtml = false, isAdmin = false, req = null) {
     res.setHeader("X-Content-Type-Options", "nosniff");
     res.setHeader("Referrer-Policy", "no-referrer");
     res.setHeader("X-Frame-Options", "DENY");
@@ -2259,58 +2582,52 @@ export async function createApp(options = {}) {
         "object-src 'none'",
         "form-action 'self'",
         "frame-ancestors 'none'",
-        `frame-src ${proxyOrigin()}`,
+        `frame-src ${proxyOrigin(req)} ${gameOrigin(req)} 'self' https://www.youtube.com https://www.youtube-nocookie.com`,
         `img-src 'self' data: https:${isAdmin ? " blob:" : ""}`,
         "font-src 'self' data:",
         "style-src 'self' 'unsafe-inline'",
         "script-src 'self'",
-        `connect-src 'self'${isAdmin ? " http://127.0.0.1:4175" : ""}`,
+        `connect-src 'self' https:${isAdmin ? " http://127.0.0.1:4175" : ""}`,
         "upgrade-insecure-requests",
       ].join("; "));
     }
-  }
-
-  function handleDashboardCors(req, res, url) {
-    if (url.pathname !== "/api/owner/dashboard/tokens") return false;
-    const origin = req.headers.origin;
-    if (origin) {
-      if (!dashboardOrigins.has(origin)) throw new HttpError(403, "This dashboard origin is not configured.", "origin_rejected");
-      res.setHeader("Access-Control-Allow-Origin", origin);
-      res.setHeader("Access-Control-Allow-Credentials", "true");
-      res.setHeader("Vary", "Origin");
-    }
-    res.setHeader("Cache-Control", "no-store");
-    if (req.method !== "OPTIONS") return false;
-    if (!origin) throw new HttpError(403, "A configured dashboard origin is required.", "origin_rejected");
-    const requestedHeaders = (req.headers["access-control-request-headers"] ?? "")
-      .split(",").map((header) => header.trim().toLowerCase()).filter(Boolean);
-    if (requestedHeaders.some((header) => !["content-type"].includes(header))) {
-      throw new HttpError(403, "The dashboard preflight requested an unsupported header.", "headers_rejected");
-    }
-    res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
-    if (requestedHeaders.length) res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-    res.setHeader("Access-Control-Max-Age", "600");
-    res.statusCode = 204;
-    res.end();
-    return true;
   }
 
   async function route(req, res) {
     const start = Date.now();
     const url = new URL(req.url, "http://nightjar.local");
     try {
-      if (handleDashboardCors(req, res, url)) return;
-      if (url.pathname.startsWith("/api/")) {
+      if (url.pathname === "/api/shuffleDict" || (url.pathname !== "/games-player.html" && isRammerheadRequest(url))) {
+        await routeProxy(req, res);
+      } else if (url.pathname.startsWith("/api/")) {
+        res.setHeader("Access-Control-Allow-Origin", "*");
+        res.setHeader("Access-Control-Allow-Methods", "GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS");
+        res.setHeader("Access-Control-Allow-Headers", "Authorization, Content-Type, X-NJ-CSRF");
+        res.setHeader("Access-Control-Max-Age", "600");
+        if (req.method === "OPTIONS") {
+          res.statusCode = 204;
+          res.end();
+          return;
+        }
         await routeApi(req, res, url);
+      } else if (url.pathname === "/games-player.html") {
+        await routeGame(req, res);
       } else {
         if (!["GET", "HEAD"].includes(req.method)) throw new HttpError(405, "Method not allowed.");
         const pathname = url.pathname === "/" ? "/index.html" : (url.pathname === "/admin" ? "/admin.html" : url.pathname);
+        if (!["/index.html", "/admin.html", "/app.js", "/admin.js", "/styles.css", "/admin.css", "/mark.svg"].includes(pathname)) {
+          throw new HttpError(404, "Not found.", "not_found");
+        }
         const filePath = resolve(PUBLIC_ROOT, `.${decodeURIComponent(pathname)}`);
         if (filePath !== PUBLIC_ROOT && !filePath.startsWith(PUBLIC_ROOT + sep)) throw new HttpError(404, "Not found.", "not_found");
         const data = await readFile(filePath);
-        securityHeaders(res, extname(filePath) === ".html", pathname === "/admin" || pathname === "/admin.html");
+        const isHtml = extname(filePath) === ".html";
+        securityHeaders(res, isHtml, pathname === "/admin" || pathname === "/admin.html", req);
+        res.setHeader("Access-Control-Allow-Origin", "*");
         res.setHeader("Content-Type", MIME_TYPES[extname(filePath)] ?? "application/octet-stream");
-        res.setHeader("Cache-Control", extname(filePath) === ".html" ? "no-store" : "public, max-age=3600");
+        res.setHeader("Cache-Control", extname(filePath) === ".html" || ["/app.js", "/admin.js"].includes(pathname)
+          ? "no-store"
+          : "public, max-age=3600");
         res.statusCode = 200;
         res.end(req.method === "HEAD" ? undefined : data);
       }
@@ -2333,14 +2650,52 @@ export async function createApp(options = {}) {
   webApp.disable("x-powered-by");
   webApp.use((req, res) => { void route(req, res); });
   server = createServer(webApp);
+  proxyServer = server;
+  gameServer = server;
 
-  const proxyApp = express();
-  proxyApp.disable("x-powered-by");
-  proxyApp.use((req, res) => { void routeProxy(req, res); });
-  proxyServer = createServer(proxyApp);
+  async function routeGame(req, res) {
+    const url = new URL(req.url, gameOrigin(req));
+    try {
+      if (!["GET", "HEAD"].includes(req.method)) throw new HttpError(405, "Method not allowed.");
+      if (url.pathname !== "/games-player.html") throw new HttpError(404, "Not found.", "not_found");
+
+      const requestedAppOrigin = url.searchParams.get("appOrigin");
+      const parsedAppOrigin = new URL(validatedEmbedOrigin(requestedAppOrigin, req));
+
+      const data = await readFile(resolve(PUBLIC_ROOT, "games-player.html"));
+      res.setHeader("Content-Type", "text/html; charset=utf-8");
+      res.setHeader("Cache-Control", "no-store");
+      res.setHeader("X-Content-Type-Options", "nosniff");
+      res.setHeader("Referrer-Policy", "no-referrer");
+      res.setHeader("Content-Security-Policy", [
+        "default-src https: http: data: blob:",
+        "base-uri https: http:",
+        "object-src 'none'",
+        "form-action https: http:",
+        `frame-ancestors ${parsedAppOrigin.origin}`,
+        "frame-src https: http: data: blob:",
+        "img-src https: http: data: blob:",
+        "font-src https: http: data: blob:",
+        "media-src https: http: data: blob:",
+        "script-src 'unsafe-inline' 'unsafe-eval' https: http: data: blob:",
+        "style-src 'unsafe-inline' https: http: data: blob:",
+        "connect-src https: http: ws: wss: data: blob:",
+        "worker-src blob: https: http:",
+      ].join("; "));
+      res.statusCode = 200;
+      res.end(req.method === "HEAD" ? undefined : data);
+    } catch (error) {
+      const known = error instanceof HttpError;
+      if (!known) console.error(JSON.stringify({ level: "error", message: error.message, path: url.pathname, method: req.method }));
+      res.statusCode = known ? error.status : 500;
+      res.setHeader("Content-Type", "text/plain; charset=utf-8");
+      res.setHeader("X-Content-Type-Options", "nosniff");
+      res.end(known ? error.message : "The game player could not be served.");
+    }
+  }
 
   async function routeProxy(req, res) {
-    const url = new URL(req.url, proxyOrigin());
+    const url = new URL(req.url, proxyOrigin(req));
     try {
       const filePath = proxyAssetPath(url.pathname);
       if (filePath) {
@@ -2351,12 +2706,18 @@ export async function createApp(options = {}) {
         res.setHeader("X-Content-Type-Options", "nosniff");
         res.setHeader("Referrer-Policy", "no-referrer");
         res.setHeader("Cross-Origin-Resource-Policy", "same-origin");
-        res.setHeader("Cache-Control", extension === ".html" ? "no-store" : "public, max-age=3600");
+        res.setHeader("Cache-Control", ["/proxy-shell.html", "/proxy-shell.css", "/dist/proxy-shell.js"].includes(url.pathname)
+          ? "no-store"
+          : extension === ".html" ? "no-store" : "public, max-age=3600");
         if (extension === ".html") {
           const appPort = server?.address()?.port ?? Number(env("PORT", "4173"));
-          const appOrigins = configuredAppOrigin
+          let appOrigins = configuredAppOrigin
             ? configuredAppOrigin
             : [`http://127.0.0.1:${appPort}`, `http://localhost:${appPort}`].join(" ");
+          const requestedAppOrigin = url.searchParams.get("appOrigin");
+          if (requestedAppOrigin) {
+            appOrigins = validatedEmbedOrigin(requestedAppOrigin, req);
+          }
           res.setHeader("Content-Security-Policy", [
             "default-src 'self'",
             "base-uri 'self'",
@@ -2381,9 +2742,6 @@ export async function createApp(options = {}) {
       if (!authorized || !allowedRammerheadDestination(url)) {
         throw new HttpError(403, "This Rammerhead request is not authorized.", "proxy_request_rejected");
       }
-      if (!trackProxySocket(authorized.userSessionId, req.socket)) {
-        throw new HttpError(429, "Too many concurrent Rammerhead connections.", "proxy_connection_limit");
-      }
       const pending = rammerhead._onRequest(req, res, rammerhead.server1Info);
       if (pending?.catch) pending.catch((error) => {
         console.error(JSON.stringify({ level: "error", message: error.message, path: url.pathname, method: req.method }));
@@ -2404,7 +2762,6 @@ export async function createApp(options = {}) {
 
   function proxyAssetPath(pathname) {
     const assets = new Map([
-      ["/", resolve(PUBLIC_ROOT, "proxy-shell.html")],
       ["/proxy-shell.html", resolve(PUBLIC_ROOT, "proxy-shell.html")],
       ["/proxy-shell.css", resolve(PUBLIC_ROOT, "proxy-shell.css")],
       ["/dist/proxy-shell.js", resolve(PUBLIC_ROOT, "dist/proxy-shell.js")],
@@ -2412,9 +2769,24 @@ export async function createApp(options = {}) {
     return assets.get(pathname) ?? null;
   }
 
+  function isRammerheadRequest(url) {
+    if (proxyAssetPath(url.pathname)) return true;
+    if ([
+      "/api/shuffleDict", "/hammerhead.js", "/iframe-task.js", "/mainport",
+      "/messaging", "/newsession", "/rammerhead.js", "/sessionexists", "/syncLocalStorage",
+      "/task.js", "/transport-worker.js", "/worker-hammerhead.js",
+    ].includes(url.pathname)) return true;
+    if (!/^\/[a-f\d]{32}(?:![^/]+)*\//i.test(url.pathname)) return false;
+    try {
+      return Boolean(parseProxyUrl(url.href)?.destUrl);
+    } catch {
+      return false;
+    }
+  }
+
   proxyServer.on("upgrade", (req, socket, head) => {
     try {
-      const url = new URL(req.url, proxyOrigin());
+      const url = new URL(req.url, proxyOrigin(req));
       const authorized = authorizedRammerheadSession(req, url);
       if (!authorized || !allowedRammerheadDestination(url)) {
         socket.destroy();
@@ -2437,6 +2809,7 @@ export async function createApp(options = {}) {
   return {
     server,
     proxyServer,
+    gameServer,
     db,
     stop() {
       clearInterval(proxyMaintenanceTimer);
@@ -2464,18 +2837,19 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     app.stop();
     if (consoleInput) consoleInput.close();
     app.server.close(() => {
-      app.proxyServer.close(() => {
-        app.db.close();
-        process.exit(0);
-      });
+      app.db.close();
+      process.exit(0);
     });
   };
-  const proxyHost = env("RAMMERHEAD_HOST", env("SCRAMJET_HOST", "127.0.0.1"));
-  app.proxyServer.listen(Number(env("RAMMERHEAD_PORT", env("SCRAMJET_PORT", "4174"))), proxyHost, () => {
-    console.info(JSON.stringify({ level: "info", message: "Rammerhead browsing engine is ready", host: proxyHost, port: app.proxyServer.address().port, origin: env("RAMMERHEAD_ORIGIN", env("SCRAMJET_ORIGIN", `http://${proxyHost}:${app.proxyServer.address().port}`)) }));
-  });
   app.server.listen(port, host, () => {
-    console.info(JSON.stringify({ level: "info", message: "Nightjar is ready", host, port, database: resolve(env("DATABASE_PATH", resolve(ROOT, "data/nightjar.sqlite"))) }));
+    console.info(JSON.stringify({
+      level: "info",
+      message: "Nightjar is ready",
+      host,
+      port,
+      endpoints: { app: "/", api: "/api", proxy: "/proxy-shell.html and /{sessionId}/…", games: "/games-player.html" },
+      database: resolve(env("DATABASE_PATH", resolve(ROOT, "data/nightjar.sqlite"))),
+    }));
     if (process.stdin.isTTY) {
       console.info("Owner commands are available in this terminal. Type `help` for token and account management.");
       consoleInput = createInterface({ input: process.stdin, output: process.stdout, prompt: "nightjar> " });
