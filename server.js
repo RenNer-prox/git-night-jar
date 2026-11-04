@@ -7,7 +7,7 @@ import { dirname, extname, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomBytes, randomUUID, scrypt as scryptCallback, timingSafeEqual, createHash, createHmac } from "node:crypto";
 import { promisify } from "node:util";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { access } from "node:fs/promises";
 import { delimiter } from "node:path";
 import { constants as fsConstants } from "node:fs";
@@ -3439,29 +3439,63 @@ export async function createApp(options = {}) {
 
 let consoleInput = null;
 
+export function formatAddressConflict(service, host, port, listenerInfo = "") {
+  const setting = service === "Luma" ? "PORT" : "RAMMERHEAD_PORT";
+  const owner = listenerInfo ? ` Existing listener: ${listenerInfo}.` : ` Identify it with \`ss -ltnp 'sport = :${port}'\` or \`lsof -nP -iTCP:${port} -sTCP:LISTEN\`.`;
+  const proxyNote = service === "Rammerhead"
+    ? " If using a manual reverse proxy, update its Rammerhead upstream to match."
+    : "";
+  return `Startup failed: ${service} cannot bind ${host}:${port} (EADDRINUSE).${owner} Leave the existing process untouched, or set ${setting} to an unused port, for example \`${setting}=4175 npm start\`.${proxyNote}`;
+}
+
+function findPortListener(port) {
+  const result = spawnSync("ss", ["-ltnp", `sport = :${port}`], { encoding: "utf8", timeout: 1000 });
+  if (result.error || result.status !== 0) return "";
+  return result.stdout.split(/\r?\n/).find((line) => line.includes(`:${port}`))?.trim() ?? "";
+}
+
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const host = env("HOST", "127.0.0.1");
   const port = Number(env("PORT", "4173"));
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("PORT must be an integer from 1 to 65535.");
   const app = await createApp();
   let shuttingDown = false;
-  const close = () => {
+  const close = (exitCode = 0) => {
     if (shuttingDown) return;
     shuttingDown = true;
+    const finalExitCode = Number.isInteger(exitCode) ? exitCode : 0;
     app.stop();
     if (consoleInput) consoleInput.close();
-    app.server.close(() => {
-      app.proxyServer.close(() => {
+    const closeServer = (server, callback) => {
+      if (server.listening) server.close(callback);
+      else callback();
+    };
+    closeServer(app.server, () => {
+      closeServer(app.proxyServer, () => {
         app.db.close();
-        process.exit(0);
+        process.exitCode = finalExitCode;
       });
     });
   };
   const proxyHost = env("RAMMERHEAD_HOST", env("SCRAMJET_HOST", "127.0.0.1"));
-  app.proxyServer.listen(Number(env("RAMMERHEAD_PORT", env("SCRAMJET_PORT", "4174"))), proxyHost, () => {
+  const proxyPort = Number(env("RAMMERHEAD_PORT", env("SCRAMJET_PORT", "4174")));
+  const listen = (server, service, listenHost, listenPort, callback) => {
+    const onError = (error) => {
+      if (error.code === "EADDRINUSE") {
+        console.error(formatAddressConflict(service, listenHost, listenPort, findPortListener(listenPort)));
+      } else {
+        console.error(`Startup failed: ${service} listener error: ${error.message}`);
+      }
+      close(1);
+    };
+    server.once("error", onError);
+    server.once("listening", () => server.off("error", onError));
+    server.listen(listenPort, listenHost, callback);
+  };
+  listen(app.proxyServer, "Rammerhead", proxyHost, proxyPort, () => {
     console.info(JSON.stringify({ level: "info", message: "Rammerhead browsing engine is ready", host: proxyHost, port: app.proxyServer.address().port, origin: env("RAMMERHEAD_ORIGIN", env("SCRAMJET_ORIGIN", `http://${proxyHost}:${app.proxyServer.address().port}`)) }));
   });
-  app.server.listen(port, host, () => {
+  listen(app.server, "Luma", host, port, () => {
     console.info(JSON.stringify({ level: "info", message: "Nightjar is ready", host, port, database: resolve(env("DATABASE_PATH", resolve(ROOT, "data/nightjar.sqlite"))) }));
     if (process.stdin.isTTY) {
       console.info("Owner commands are available in this terminal. Type `help` for token and account management.");

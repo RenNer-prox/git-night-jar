@@ -68,6 +68,29 @@ After fetching and switching to the published Luma branch, run `npm ci` from the
 
 `npm start` compiles the typed Rammerhead shell and runs both local listeners in one process: the Luma app on port `4173` and the Rammerhead service on `4174`. Keep both running. Ollama is started by Luma when configured and available; it is not a separate terminal requirement. For a local model that is not installed yet, install it yourself with `ollama pull qwen3:4b`. Set `OLLAMA_AUTOSTART=0` if the app should not start Ollama.
 
+If startup reports `EADDRINUSE`, another process already owns the requested listener. Luma reports the listener when Linux `ss` is available and exits without terminating it. Inspect the owner with `ss -ltnp 'sport = :4173'` (or `lsof -nP -iTCP:4173 -sTCP:LISTEN`), then either stop/reconfigure that service yourself or choose another port, for example `PORT=4175 npm start`. For a collision on the Rammerhead listener, use `RAMMERHEAD_PORT=4175 npm start`; if using the manual Caddy setup, update the corresponding reverse-proxy upstream too. Port overrides are not needed for the Docker Compose deployment, where the Node listeners are private to its network.
+
+### Automated Docker deployment
+
+For a Linux host with Docker Engine and the Docker Compose plugin, the setup command can generate production settings, build the app image, and start Luma behind Caddy. It does not install Docker/Caddy on the host, edit host firewall or DNS settings, or overwrite your existing database. Choose a registered base domain; Luma and untrusted proxied pages use separate HTTPS origins under that domain:
+
+```sh
+npm run setup -- --domain example.com
+```
+
+The command creates or updates `.env` with production origins, generates missing bootstrap secrets, sets file permissions to owner-only, validates the Compose configuration, then runs `docker compose up --build -d`. Existing credentials and unrelated settings in `.env` are preserved. When `.env` is first generated, the owner bootstrap password is stored there; retrieve it securely before signing in to `/admin`. `ADMIN_INITIAL_PASSWORD` initializes a new database only and does not reset an existing owner password.
+
+Preview the settings/actions without writing files or starting containers, or validate an existing deployment configuration without changing it:
+
+```sh
+npm run setup -- --domain example.com --dry-run
+npm run setup -- --check
+```
+
+Before starting services, create DNS A/AAAA records for both `example.com` and `proxy.example.com` pointing to the Docker host. Allow inbound TCP ports 80 and 443; UDP 443 is optional for HTTP/3. Caddy obtains and renews certificates after DNS resolves and the ports are reachable. The app and Rammerhead ports are private to the Compose network; only Caddy publishes ports. SQLite data and Caddy certificate state live in named Docker volumes. Back up the `luma_data` volume before host or volume maintenance. To inspect or stop the services, use `docker compose ps` and `docker compose down`; `down` keeps named data volumes unless `--volumes` is explicitly added. The Compose deployment disables Ollama autostart; configure a separately reachable Ollama service if local AI is needed.
+
+The deployment command intentionally does not configure S3 or Jellyfin. Their setup still needs actual provider/server identifiers and credentials; see [Amazon S3 and Jellyfin](#amazon-s3-and-jellyfin). It does not install software or mutate configuration on a remote S3 bucket or Jellyfin server.
+
 To enable the desktop companion, generate a random 32-byte hex secret on a trusted machine:
 
 ```sh
@@ -121,7 +144,7 @@ Create custom ranks with `ranks create "Study group" --permissions browse,games,
 
 `.env` is ignored by Git. `.env.example` contains placeholders only. `SCRAMJET_HOST`, `SCRAMJET_PORT`, and `SCRAMJET_ORIGIN` remain accepted as legacy aliases. Do not expose the app, Rammerhead server or Ollama API directly to the public Internet.
 
-### Reverse-proxy deployment
+### Manual reverse-proxy deployment
 
 Use the provided `Caddyfile` to serve the app at `https://example.com` and Rammerhead at `https://proxy.example.com`. They share one registered base domain but remain separate browser origins; do not combine them under one hostname/path because untrusted proxied pages must not share Luma's account origin. Caddy handles TLS certificates, WebSocket upgrades, and proxy streaming. Set `APP_ORIGIN=https://example.com` and `RAMMERHEAD_ORIGIN=https://proxy.example.com` in the app environment, and keep both Node listeners bound to loopback.
 
@@ -138,7 +161,9 @@ For a systemd-managed Caddy service, persist `APP_DOMAIN` in a systemd service o
 
 Luma's current storage feature uses account-isolated SQLite files on the app server; it does not upload to Amazon S3. No S3 browser CORS policy is added. A server-side S3 integration would need the bucket name, AWS region, private server credentials/IAM permissions, and a requested upload limit; direct browser-to-S3 uploads would additionally require a narrowly scoped bucket CORS policy allowing only the Luma app origin, never the Rammerhead proxy origin.
 
-There is no Jellyfin integration or CORS proxy configured. To connect it safely would require a reachable HTTPS Jellyfin base URL, a scoped Jellyfin API credential, and the intended media feature; CORS must be configured on Jellyfin for the exact Luma app origin. Do not add wildcard CORS or expose Jellyfin credentials to proxied sites. The app does not configure a remote S3 bucket or Jellyfin server.
+There is no Jellyfin integration or CORS proxy configured. To connect it safely would require a reachable HTTPS Jellyfin base URL, the intended media feature, and a Jellyfin API key stored only in server-side secret configuration. Add only the exact Luma app origin (for example `https://example.com`) to Jellyfin's CORS allowed-origin setting; do not allow `*`, the Rammerhead origin, or arbitrary request origins. The deployment script does not configure Jellyfin or transmit credentials.
+
+No bucket name, region, account, upload workflow, or S3 credentials are currently configured. Before a future integration, choose the bucket and region, a maximum upload size, and a server-side IAM role/policy limited to the required bucket and operations. Prefer workload identity/role credentials over long-lived access keys. If that integration uses browser-signed uploads, the bucket CORS policy must allow only the exact Luma app origin, only the methods the upload flow needs (typically `PUT` and `GET`), and only required headers; do not include the Rammerhead origin or wildcard origins. The deployment script does not create buckets, apply policies, or enable cloud storage.
 
 ## Tokens, ranks and sessions
 

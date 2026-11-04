@@ -15,6 +15,7 @@
   "scripts": {
     "searcher": "electron desktop-searcher/main.js",
     "build:proxy": "tsc --project tsconfig.json",
+    "setup": "node scripts/setup.mjs",
     "start": "node server.js",
     "prestart": "npm run build:proxy",
     "dev": "node --watch server.js",

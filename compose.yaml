@@ -1,0 +1,40 @@
+services:
+  luma:
+    build:
+      context: .
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: production
+      HOST: 0.0.0.0
+      PORT: "4173"
+      RAMMERHEAD_HOST: 0.0.0.0
+      RAMMERHEAD_PORT: "4174"
+      DATABASE_PATH: /app/data/nightjar.sqlite
+      APP_ORIGIN: ${APP_ORIGIN:?Run npm run setup -- --domain example.com}
+      RAMMERHEAD_ORIGIN: ${RAMMERHEAD_ORIGIN:?Run npm run setup -- --domain example.com}
+      OLLAMA_AUTOSTART: "0"
+    volumes:
+      - luma_data:/app/data
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      - luma
+    environment:
+      APP_DOMAIN: ${APP_DOMAIN:?Run npm run setup -- --domain example.com}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  luma_data:
+  caddy_data:
+  caddy_config:

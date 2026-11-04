@@ -1,0 +1,11 @@
+{$APP_DOMAIN} {
+	encode zstd gzip
+	reverse_proxy luma:4173
+}
+
+proxy.{$APP_DOMAIN} {
+	encode zstd gzip
+	reverse_proxy luma:4174 {
+		flush_interval -1
+	}
+}
