@@ -21,7 +21,7 @@
     "predev": "npm run build:proxy",
     "manage": "node admin-cli.js",
     "companion": "python3 desktop-companion/companion.py",
-    "test": "node --test"
+    "test": "PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p '*_test.py' && node --test"
   },
   "devDependencies": {
     "typescript": "5.9.3"

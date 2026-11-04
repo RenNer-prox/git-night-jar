@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark light">
+    <meta name="theme-color" content="#101111">
+    <title>Report a bug · Luma</title>
+    <link rel="icon" href="/mark.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="/styles.css">
+    <script src="/bugs.js" type="module"></script>
+  </head>
+  <body>
+    <main class="bug-page">
+      <a class="brand" href="/" aria-label="Luma home"><span class="brand-mark" aria-hidden="true">✦</span><span>luma<span class="brand-dot">.</span></span></a>
+      <section class="bug-card">
+        <p class="eyebrow">PRIVATE REPORT</p>
+        <h1>Report a bug</h1>
+        <p class="muted">Reports are stored privately for the Luma owner. They are not posted publicly and do not expose reported users.</p>
+        <p id="bug-auth" class="form-error" hidden></p>
+        <form id="bug-form" class="stack-form" hidden>
+          <label for="bug-subject">Summary</label>
+          <input id="bug-subject" name="subject" minlength="4" maxlength="120" required>
+          <label for="bug-message">What happened? Include steps to reproduce if possible.</label>
+          <textarea id="bug-message" name="message" minlength="10" maxlength="4000" rows="8" required></textarea>
+          <button class="primary-button full-button" type="submit">Send private bug report</button>
+        </form>
+        <p id="bug-success" class="muted" role="status" hidden></p>
+        <a class="text-button" href="/">Back to Luma</a>
+      </section>
+    </main>
+  </body>
+</html>

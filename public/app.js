@@ -40,7 +40,7 @@ for (const [selector, name] of Object.entries(icons)) {
 
 const defaults = {
   theme: "dark",
-  accent: "#ff7048",
+  accent: "#75cfff",
   density: "comfortable",
   homepage: "home",
   searchProvider: "duckduckgo",
@@ -165,7 +165,7 @@ function applySettings() {
       iconLink.href = "/mark.svg";
     }
   }
-  document.title = (canCustomize ? state.settings.customTitle?.trim() : "") || (state.account ? `Nightjar — ${state.account.label}` : "Nightjar");
+  document.title = (canCustomize ? state.settings.customTitle?.trim() : "") || (state.account ? `Luma — ${state.account.label}` : "Luma");
   const toggle = $("#theme-toggle");
   if (toggle) {
     const nextTheme = { dark: "light", light: "system", system: "dark" }[state.settings.theme] ?? "light";
@@ -530,7 +530,7 @@ function applyDisplay(result) {
   renderTabs();
   if (activeTab()) selectTab(activeTab().id);
   void prepareProxyShell();
-  document.title = `Nightjar — ${state.account.label}`;
+  document.title = `Luma — ${state.account.label}`;
 }
 
 function applyAccountFeatures() {
@@ -543,6 +543,9 @@ function applyAccountFeatures() {
   $("#bookmark-current").hidden = !permits("bookmarks");
   $("#games-open").hidden = !permits("games");
   $("#admin-link").hidden = state.account?.rank !== "owner";
+  $("#notes-open").hidden = !permits("notes");
+  $("#storage-open").hidden = !permits("storage");
+  $("#chat-open").hidden = !permits("chat");
 }
 
 async function saveToolbarOrder(order) {
@@ -619,7 +622,7 @@ async function api(path, options = {}) {
       body: options.body === undefined ? undefined : JSON.stringify(options.body),
     });
   } catch {
-    throw new Error("Nightjar could not reach the local service. Check the connection and try again.");
+    throw new Error("Luma could not reach the service. Check the connection and try again.");
   }
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
@@ -904,7 +907,7 @@ function openDownloads() {
   openDialog({
     title: "Downloads",
     subtitle: "Host-browser downloads are outside this workspace.",
-    content: `<div class="permission-note"><span class="note-icon">${svg("download", 15)}</span><span>${escapeHtml(info)} Download links that a site permits may still be handled by the browser you are using.</span></div>${emptyState("download", "No integrated downloads", "Nightjar does not monitor your device or pretend to manage files it cannot access.")}`,
+    content: `<div class="permission-note"><span class="note-icon">${svg("download", 15)}</span><span>${escapeHtml(info)} Download links that a site permits may still be handled by the browser you are using.</span></div>${emptyState("download", "No integrated downloads", "Luma does not monitor your device or pretend to manage files it cannot access.")}`,
   });
 }
 
@@ -927,7 +930,7 @@ function openAssistant() {
   const ai = state.capabilities?.ai;
   const ready = Boolean(ai?.reachable && ai?.modelInstalled);
   const status = ready
-    ? `Local model ready · ${ai.model}${ai.startedByApp ? " · service started by Nightjar" : " · existing local service"}`
+    ? `Local model ready · ${ai.model}${ai.startedByApp ? " · service started by Luma" : " · existing local service"}`
     : `Waiting for local model · ${ai?.model ?? "qwen3:4b"}`;
   openDialog({
     title: "Local assistant",
@@ -1050,10 +1053,10 @@ function settingsMarkup(settings) {
     </div></fieldset>
     <label class="form-field"><span class="field-label">Interface density</span><select class="field-select" name="density"><option value="compact">Compact</option><option value="comfortable">Comfortable</option><option value="spacious">Spacious</option></select></label>
     <label class="form-field"><span class="field-label">Default search provider</span><select class="field-select" name="searchProvider"><option value="duckduckgo">DuckDuckGo</option><option value="brave">Brave Search</option><option value="bing">Bing</option><option value="google">Google</option><option value="yandex">Yandex</option></select></label>
-    <div class="form-field wide-field customization-card"><span class="field-label">Workspace customization</span><label class="customization-input"><span>Browser tab title</span><input class="field-input" name="customTitle" maxlength="60" placeholder="Nightjar — your name"></label><label class="customization-input"><span>Tab icon (emoji or symbol)</span><input class="field-input" name="customIcon" maxlength="4" placeholder="🌙"></label><p class="table-secondary">Drag toolbar icons to rearrange them. Your order is saved to this account.</p></div>
-    <label class="form-field"><span class="field-label">Homepage</span><select class="field-select" name="homepageType"><option value="home">Nightjar start page</option><option value="blank">Blank page</option><option value="custom">Custom address</option></select></label>
+    <div class="form-field wide-field customization-card"><span class="field-label">Workspace customization</span><label class="customization-input"><span>Browser tab title</span><input class="field-input" name="customTitle" maxlength="60" placeholder="Luma — your name"></label><label class="customization-input"><span>Tab icon (emoji or symbol)</span><input class="field-input" name="customIcon" maxlength="4" placeholder="🌙"></label><p class="table-secondary">Drag toolbar icons to rearrange them. Your order is saved to this account.</p></div>
+    <label class="form-field"><span class="field-label">Homepage</span><select class="field-select" name="homepageType"><option value="home">Luma start page</option><option value="blank">Blank page</option><option value="custom">Custom address</option></select></label>
     <label class="form-field wide-field custom-home-field" ${homepageValue !== "custom" ? "hidden" : ""}><span class="field-label">Custom homepage address</span><input class="field-input" name="homepage" type="url" placeholder="https://example.com" value="${escapeHtml(customHomepage)}"></label>
-    <div class="form-field wide-field"><span class="field-label">Accent color</span><div class="accent-presets" role="group" aria-label="Accent color presets">${[["#ff7048", "Coral"], ["#a78bfa", "Violet"], ["#52c7a5", "Jade"], ["#6ba8ff", "Blue"], ["#f08ab5", "Rose"]].map(([color, name]) => `<button type="button" class="accent-swatch${settings.accent.toLowerCase() === color ? " selected" : ""}" style="--swatch:${color}" data-accent="${color}" aria-label="${name} accent" aria-pressed="${settings.accent.toLowerCase() === color}"></button>`).join("")}<span class="accent-custom-label">Custom</span><div class="color-field"><input name="accentPicker" type="color" value="${escapeHtml(settings.accent)}" aria-label="Custom accent color"><input class="field-input" name="accent" value="${escapeHtml(settings.accent)}" maxlength="7" aria-label="Accent hex color"></div></div></div>
+    <div class="form-field wide-field"><span class="field-label">Accent color</span><div class="accent-presets" role="group" aria-label="Accent color presets">${[["#75cfff", "Sky blue"], ["#a78bfa", "Violet"], ["#52c7a5", "Jade"], ["#6ba8ff", "Blue"], ["#f08ab5", "Rose"]].map(([color, name]) => `<button type="button" class="accent-swatch${settings.accent.toLowerCase() === color ? " selected" : ""}" style="--swatch:${color}" data-accent="${color}" aria-label="${name} accent" aria-pressed="${settings.accent.toLowerCase() === color}"></button>`).join("")}<span class="accent-custom-label">Custom</span><div class="color-field"><input name="accentPicker" type="color" value="${escapeHtml(settings.accent)}" aria-label="Custom accent color"><input class="field-input" name="accent" value="${escapeHtml(settings.accent)}" maxlength="7" aria-label="Accent hex color"></div></div></div>
     <div class="form-field wide-field"><div class="toggle-field"><span class="toggle-copy">Custom cursor<small>Animated states for browsing, links, text and drag actions.</small></span><label class="switch"><input type="checkbox" name="customCursor"><span></span></label></div></div>
     <div class="form-field wide-field privacy-grid">
       <div class="toggle-field"><span class="toggle-copy">Suppress page referrers<small>Ask the embedded page not to send the previous address to sites.</small></span><label class="switch"><input type="checkbox" name="suppressReferrer"><span></span></label></div>
@@ -1066,7 +1069,7 @@ function settingsMarkup(settings) {
 function openSettings() {
   if (!state.account.permissions.includes("settings") || !state.account.features.includes("settings")) return toast("Settings are not enabled for this account.");
   const footer = `<span class="muted" style="font-size:9px">Changes apply to this account.</span><div class="dialog-footer-right"><button id="cancel-settings" class="secondary-button" type="button">Cancel</button><button id="save-settings" class="primary-button" type="button">Save changes</button></div>`;
-  openDialog({ title: "Settings", subtitle: "Make Nightjar feel like yours. Changes are saved to this account.", content: settingsMarkup(state.settings), footer });
+  openDialog({ title: "Settings", subtitle: "Make Luma feel like yours. Changes are saved to this account.", content: settingsMarkup(state.settings), footer });
   const form = $("#settings-form");
   form.elements.theme.value = state.settings.theme;
   form.elements.density.value = state.settings.density;
@@ -1153,29 +1156,30 @@ function openHelp() {
     <section class="help-card"><span class="help-card-kicker">QUICK START</span><h3>Your workspace, at a glance</h3><p>Type a web address or search in the top bar. Use <strong>+</strong> to open a tab, the bookmark icon to save a page, and the toolbar to find your history, local assistant, and settings.</p><p>Right-click the workspace or a tab for handy actions. Your tabs are saved in this browser on this device; bookmarks, history, and preferences are linked to your account.</p></section>
     <section class="help-card"><span class="help-card-kicker">MAKE IT YOURS</span><h3>Appearance and comfort</h3><p>Choose <strong>dark</strong>, <strong>light</strong>, or <strong>system</strong> appearance from the moon/sun button or Settings. Set an accent color, interface density, homepage, and search provider in Settings.</p><p>The animated cursor automatically gives way to your native cursor for reduced-motion preferences, touch input, and text entry.</p></section>
     <section class="help-card help-shortcuts"><span class="help-card-kicker">KEYBOARD SHORTCUTS</span><h3>Move around faster</h3><div class="help-shortcut-list">${shortcuts.map(([label, keys]) => `<div class="help-shortcut"><span>${escapeHtml(label)}</span><kbd>${escapeHtml(keys)}</kbd></div>`).join("")}</div></section>
-    <section class="help-card"><span class="help-card-kicker">PRIVACY & LIMITS</span><h3>What this browser can do</h3><p>Websites open through Nightjar's separate-origin Rammerhead browsing engine. Destinations are limited to public HTTP(S) sites on ports 80 and 443. Some sites may still be incompatible; use <strong>Open in a regular tab</strong> when needed.</p><p>Downloads belong to the host browser. This web app does not control your device or regular browser. Desktop sharing or input requires a separately installed companion and local approval; an owner password alone cannot activate it.</p></section>
+    <section class="help-card"><span class="help-card-kicker">PRIVACY & LIMITS</span><h3>What this browser can do</h3><p>Websites open through Luma's separate-origin Rammerhead browsing engine. Destinations are limited to public HTTP(S) sites on ports 80 and 443. Some sites may still be incompatible; use <strong>Open in a regular tab</strong> when needed.</p><p>Downloads belong to the host browser. This web app does not control your device or regular browser. Desktop sharing or input requires a separately installed companion and local approval; an owner password alone cannot activate it.</p></section>
     <section class="help-card"><span class="help-card-kicker">LOCAL AI</span><h3>Ask the on-device assistant</h3><p>The assistant uses your local Ollama model and can be opened from the toolbar. Its chat is not saved, and it cannot read your open pages, files, or credentials. If unavailable, check Ollama and the model status in Settings or ask the workspace owner.</p></section>
-    <section class="help-card"><span class="help-card-kicker">GAME LOUNGE</span><h3>Pick a game and play</h3><p>Open the toolbar's Game lounge to explore GN Math in a fresh Nightjar tab or play the built-in Quick Math sprint. The sprint's best score stays in this browser profile.</p></section>
-    <section class="help-card help-contact"><span class="help-card-kicker">SUPPORT & IDEAS</span><h3>Help us make Nightjar better</h3><p>Send a private support request or feature suggestion to the owner. It is stored in this workspace for owner review and is not sent to an external service.</p>${canSendFeedback ? '<div class="fallback-actions"><button id="help-support" class="secondary-button" type="button">Contact support</button><button id="help-suggest" class="primary-button" type="button">Share an idea</button></div>' : '<p class="muted">Support requests are not enabled for this account. Ask the owner for access.</p>'}</section>
+    <section class="help-card"><span class="help-card-kicker">GAME LOUNGE</span><h3>Pick a game and play</h3><p>Open the toolbar's Game lounge to explore GN Math in a fresh Luma tab or play the built-in Quick Math sprint. The sprint's best score stays in this browser profile.</p></section>
+    <section class="help-card help-contact"><span class="help-card-kicker">SUPPORT & IDEAS</span><h3>Help us make Luma better</h3><p>Send a private support request or feature suggestion to the owner. Reports stay private to this instance.</p><div class="fallback-actions">${canSendFeedback ? '<button id="help-support" class="secondary-button" type="button">Contact support</button>' : ""}<button id="help-suggest" class="secondary-button" type="button">Share an idea</button><a class="primary-button" href="/bugs">Report a bug</a></div></section>
     <section class="help-card"><span class="help-card-kicker">INVITATION PRIVACY</span><h3>One-time sign-in</h3><p>An invitation is redeemed once. After that, the browser uses a server-validated, HttpOnly cookie session, so refreshing does not need the invitation again. A token remains a bearer credential until first redemption—keep it private and share it only with its intended person.</p></section>
   </div>`;
-  openDialog({ title: "Nightjar help", subtitle: "A friendly guide to your private browsing workspace.", content, wide: true, footer: `<span class="muted help-footer-note">Press Esc to close</span><div class="dialog-footer-right"><button id="help-done" class="primary-button" type="button">Got it</button></div>` });
+  openDialog({ title: "Luma help", subtitle: "A friendly guide to your private browsing workspace.", content, wide: true, footer: `<span class="muted help-footer-note">Press Esc to close</span><div class="dialog-footer-right"><button id="help-done" class="primary-button" type="button">Got it</button></div>` });
   $("#help-done").addEventListener("click", closeDialog);
   $("#help-support")?.addEventListener("click", () => openFeedback("support"));
   $("#help-suggest")?.addEventListener("click", () => openFeedback("suggestion"));
 }
 
 function openFeedback(kind) {
-  if (!state.account?.permissions.includes("support") || !state.account.features.includes("support")) {
+  if (kind === "support" && (!state.account?.permissions.includes("support") || !state.account.features.includes("support"))) {
     toast("Support messages are not enabled for this account.");
     return;
   }
   const suggestion = kind === "suggestion";
+  const bug = kind === "bug";
   openDialog({
-    title: suggestion ? "Share a suggestion" : "Contact support",
-    subtitle: "This message is saved privately for the Nightjar owner to review.",
-    content: `<form id="feedback-form" class="stack-form"><label for="feedback-subject">Subject</label><input id="feedback-subject" name="subject" maxlength="120" minlength="4" required placeholder="${suggestion ? "What would make Nightjar better?" : "How can we help?"}"><label for="feedback-message">Details</label><textarea id="feedback-message" name="message" maxlength="4000" minlength="10" rows="6" required placeholder="Share enough detail for the owner to follow up."></textarea></form>`,
-    footer: '<span class="muted" style="font-size:9px">Stored in this Nightjar instance only.</span><div class="dialog-footer-right"><button class="secondary-button" data-close-dialog type="button">Cancel</button><button id="send-feedback" class="primary-button" type="button">Send privately</button></div>',
+    title: suggestion ? "Share a suggestion" : bug ? "Report a bug" : "Contact support",
+    subtitle: "This message is stored privately for Luma owner review.",
+    content: `<form id="feedback-form" class="stack-form"><label for="feedback-subject">Subject</label><input id="feedback-subject" name="subject" maxlength="120" minlength="4" required placeholder="${suggestion ? "What would make Luma better?" : bug ? "What went wrong?" : "How can we help?"}"><label for="feedback-message">Details</label><textarea id="feedback-message" name="message" maxlength="4000" minlength="10" rows="6" required placeholder="Share enough detail for the owner to follow up."></textarea></form>`,
+    footer: '<span class="muted" style="font-size:9px">Private to this Luma instance and its owner.</span><div class="dialog-footer-right"><button class="secondary-button" data-close-dialog type="button">Cancel</button><button id="send-feedback" class="primary-button" type="button">Send privately</button></div>',
   });
   $("[data-close-dialog]").addEventListener("click", closeDialog);
   $("#send-feedback").addEventListener("click", async () => {
@@ -1190,12 +1194,179 @@ function openFeedback(kind) {
         message: form.elements.message.value.trim(),
       } });
       closeDialog();
-      toast(suggestion ? "Suggestion sent to the owner." : "Support request sent to the owner.");
+      toast(suggestion ? "Suggestion sent privately." : bug ? "Bug report sent privately." : "Support request sent privately.");
     } catch (error) {
       toast(error.message);
       button.disabled = false;
     }
   });
+}
+
+async function openNotes() {
+  let items = [];
+  try { items = (await api("/api/notes")).items; }
+  catch (error) { return toast(error.message); }
+  const render = () => {
+    const body = items.length ? items.map((item) => `<article class="workspace-item"><div><strong>${escapeHtml(item.title)}</strong><p>${escapeHtml(item.content.slice(0, 180))}${item.content.length > 180 ? "…" : ""}</p></div><div class="workspace-item-actions"><button class="text-button" type="button" data-edit-note="${item.id}">Edit</button><button class="text-button danger-text" type="button" data-delete-note="${item.id}">Delete</button></div></article>`).join("") : '<p class="muted">No notes yet. Notes are private to your account.</p>';
+    openDialog({
+      title: "Private notes",
+      subtitle: "Up to 50 notes per account; each note can contain 20,000 characters.",
+      wide: true,
+      content: `<div id="notes-list" class="workspace-list">${body}</div>`,
+      footer: '<button id="note-create" class="primary-button" type="button">＋ New note</button>',
+    });
+    $("#note-create").addEventListener("click", () => editNote());
+    $$("[data-edit-note]").forEach((button) => button.addEventListener("click", () => editNote(items.find((item) => item.id === button.dataset.editNote))));
+    $$("[data-delete-note]").forEach((button) => button.addEventListener("click", async () => {
+      try {
+        await api(`/api/notes/${button.dataset.deleteNote}`, { method: "DELETE" });
+        items = items.filter((item) => item.id !== button.dataset.deleteNote);
+        render();
+      } catch (error) { toast(error.message); }
+    }));
+  };
+  const editNote = (note = null) => {
+    openDialog({
+      title: note ? "Edit note" : "New note",
+      content: `<form id="note-form" class="stack-form"><label for="note-title">Title</label><input id="note-title" name="title" maxlength="120" required value="${escapeHtml(note?.title ?? "")}"><label for="note-content">Note</label><textarea id="note-content" name="content" maxlength="20000" rows="12">${escapeHtml(note?.content ?? "")}</textarea></form>`,
+      footer: '<button class="secondary-button" data-close-dialog type="button">Cancel</button><button id="note-save" class="primary-button" type="button">Save note</button>',
+    });
+    $("[data-close-dialog]").addEventListener("click", render);
+    $("#note-save").addEventListener("click", async () => {
+      const form = $("#note-form");
+      if (!form.reportValidity()) return;
+      try {
+        const result = await api(note ? `/api/notes/${note.id}` : "/api/notes", {
+          method: note ? "PATCH" : "POST",
+          body: { title: form.elements.title.value.trim(), content: form.elements.content.value },
+        });
+        if (note) items = items.map((item) => item.id === note.id ? result.item : item);
+        else items.unshift(result.item);
+        render();
+      } catch (error) { toast(error.message); }
+    });
+  };
+  render();
+}
+
+async function openStorage() {
+  let result;
+  try { result = await api("/api/storage"); }
+  catch (error) { return toast(error.message); }
+  const render = () => {
+    const list = result.items.length ? result.items.map((item) => `<article class="workspace-item"><div><strong>${escapeHtml(item.name)}</strong><p>${(item.size / 1024).toFixed(1)} KB · ${escapeHtml(item.type)}</p></div><div class="workspace-item-actions"><a class="text-button" href="/api/storage/${item.id}/download">Download</a><button class="text-button danger-text" type="button" data-delete-file="${item.id}">Delete</button></div></article>`).join("") : '<p class="muted">No files uploaded yet.</p>';
+    openDialog({
+      title: "Luma cloud storage",
+      subtitle: `${(result.usedBytes / 1024 / 1024).toFixed(2)} MB of ${(result.quotaBytes / 1024 / 1024).toFixed(0)} MB used · up to 1 MB per file`,
+      wide: true,
+      content: `<div class="workspace-list">${list}</div><form id="storage-upload" class="storage-upload"><label for="storage-file">Upload a file</label><input id="storage-file" type="file" accept=".txt,.pdf,.json,.png,.jpg,.jpeg,.webp" required><button class="primary-button" type="submit">Upload</button></form><p class="table-secondary">Files are stored in this Luma server's SQLite database, not an external cloud provider.</p>`,
+      footer: '<button class="secondary-button" data-close-dialog type="button">Done</button>',
+    });
+    $("[data-close-dialog]").addEventListener("click", closeDialog);
+    $$("[data-delete-file]").forEach((button) => button.addEventListener("click", async () => {
+      try {
+        await api(`/api/storage/${button.dataset.deleteFile}`, { method: "DELETE" });
+        result = await api("/api/storage");
+        render();
+      } catch (error) { toast(error.message); }
+    }));
+    $("#storage-upload").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const file = $("#storage-file").files[0];
+      if (!file) return;
+      if (file.size > 1024 * 1024) return toast("Files are limited to 1 MB.");
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      let binary = "";
+      for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+        binary += String.fromCharCode(...bytes.subarray(offset, Math.min(offset + 0x8000, bytes.length)));
+      }
+      const type = file.type || ({
+        pdf: "application/pdf", txt: "text/plain", json: "application/json", png: "image/png",
+        jpg: "image/jpeg", jpeg: "image/jpeg", webp: "image/webp",
+      }[file.name.split(".").at(-1).toLowerCase()] ?? "");
+      try {
+        await api("/api/storage", { method: "POST", body: { name: file.name, type, content: btoa(binary) } });
+        result = await api("/api/storage");
+        render();
+        toast("File uploaded.");
+      } catch (error) { toast(error.message); }
+    });
+  };
+  render();
+}
+
+async function openChat() {
+  let contacts;
+  try { contacts = (await api("/api/chat/contacts")).items; }
+  catch (error) { return toast(error.message); }
+  const renderContacts = () => {
+    const list = contacts.length ? contacts.map((contact) => `<button class="workspace-contact" type="button" data-chat-peer="${contact.id}"><strong>${escapeHtml(contact.label)}</strong><span>${escapeHtml(contact.rank)}</span></button>`).join("") : '<p class="muted">No chat contacts are available. Ask the owner to add people to the invite-only Friends list.</p>';
+    openDialog({ title: "Private chat", subtitle: "Only invitees listed as friends can message each other.", content: `<div class="workspace-list">${list}</div>`, footer: '<button class="secondary-button" data-close-dialog type="button">Done</button>' });
+    $("[data-close-dialog]").addEventListener("click", closeDialog);
+    $$("[data-chat-peer]").forEach((button) => button.addEventListener("click", () => void openChatThread(contacts.find((item) => item.id === button.dataset.chatPeer))));
+  };
+  renderContacts();
+}
+
+async function openChatThread(peer) {
+  if (!peer) return;
+  let result;
+  try { result = await api(`/api/chat/messages?peer=${encodeURIComponent(peer.id)}`); }
+  catch (error) { return toast(error.message); }
+  const render = () => {
+    const messages = result.items.length ? result.items.map((message) => `<article class="chat-message"><p>${escapeHtml(message.message)}</p><small>${message.sender_account_id === state.account.id ? "You" : escapeHtml(peer.label)} · ${escapeHtml(new Date(message.created_at).toLocaleString())}</small>${message.sender_account_id !== state.account.id ? `<button class="text-button" type="button" data-report-message="${message.id}">Report</button>` : ""}</article>`).join("") : '<p class="muted">Start a private conversation.</p>';
+    openDialog({
+      title: `Chat · ${peer.label}`,
+      subtitle: "Messages are private to these two accounts and stored by this Luma instance.",
+      wide: true,
+      content: `<div class="chat-thread">${messages}</div><form id="chat-send" class="storage-upload"><label for="chat-message">Message</label><textarea id="chat-message" maxlength="2000" rows="3" required></textarea><button class="primary-button" type="submit">Send</button></form>`,
+      footer: `<button id="chat-block" class="danger-button" type="button">Block contact</button><button class="secondary-button" data-close-dialog type="button">Done</button>`,
+    });
+    $("[data-close-dialog]").addEventListener("click", closeDialog);
+    $("#chat-send").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const input = $("#chat-message");
+      try {
+        await api("/api/chat/messages", { method: "POST", body: { peer: peer.id, message: input.value.trim() } });
+        result = await api(`/api/chat/messages?peer=${encodeURIComponent(peer.id)}`);
+        render();
+      } catch (error) { toast(error.message); }
+    });
+    $("#chat-block").addEventListener("click", async () => {
+      if (!confirm(`Block chat with ${peer.label}?`)) return;
+      try { await api(`/api/chat/blocks/${peer.id}`, { method: "POST", body: {} }); closeDialog(); toast("Contact blocked."); }
+      catch (error) { toast(error.message); }
+    });
+    $$("[data-report-message]").forEach((button) => button.addEventListener("click", async () => {
+      const reason = prompt("Why are you reporting this message?");
+      if (!reason) return;
+      try { await api("/api/chat/report", { method: "POST", body: { messageId: button.dataset.reportMessage, reason } }); toast("Report sent privately to the owner."); }
+      catch (error) { toast(error.message); }
+    }));
+  };
+  render();
+}
+
+async function openRankStore() {
+  try {
+    const result = await api("/api/rank-store");
+    const items = result.items.map((rank) => `<article class="rank-store-card"><h3>${escapeHtml(rank.label)}</h3><p>${rank.id === "basic" ? "Free" : "Invite-only"}</p><div class="token-permissions">${rank.features.map((feature) => `<span>${escapeHtml(feature)}</span>`).join("")}</div>${rank.id === "basic" ? '<span class="status-badge active">Available</span>' : `<button class="secondary-button" type="button" data-rank-request="${escapeHtml(rank.id)}">Request upgrade</button>`}</article>`).join("");
+    openDialog({
+      title: "Rank store",
+      subtitle: result.message,
+      wide: true,
+      content: `<div class="rank-store-grid">${items}</div><p class="table-secondary">There is no payment processor configured. Upgrade requests go privately to the owner; no payment is taken.</p>`,
+      footer: '<button class="secondary-button" data-close-dialog type="button">Done</button>',
+    });
+    $("[data-close-dialog]").addEventListener("click", closeDialog);
+    $$("[data-rank-request]").forEach((button) => button.addEventListener("click", async () => {
+      try {
+        const requested = await api("/api/rank-store/request", { method: "POST", body: { rank: button.dataset.rankRequest } });
+        toast(requested.message);
+        closeDialog();
+      } catch (error) { toast(error.message); }
+    }));
+  } catch (error) { toast(error.message); }
 }
 
 function newMathQuestion() {
@@ -1227,7 +1398,7 @@ function openMathGame() {
   const content = `<section class="game-lounge" aria-label="Game lounge">
     <article class="game-launch-card game-launch-featured">
       <div class="game-art game-art-portal" aria-hidden="true"><span class="game-art-orbit"></span><span class="game-art-glyph">G</span><span class="game-art-spark">✦</span></div>
-      <div class="game-launch-copy"><span class="game-launch-kicker">THE GAME LIBRARY</span><h3>Find your next favorite.</h3><p>Explore GN Math’s collection of quick browser games, opened in a fresh Nightjar tab through the private browsing surface.</p><button id="open-gn-math" class="primary-button" type="button">Explore GN Math <span aria-hidden="true">↗</span></button></div>
+      <div class="game-launch-copy"><span class="game-launch-kicker">THE GAME LIBRARY</span><h3>Find your next favorite.</h3><p>Explore GN Math’s collection of quick browser games, opened in a fresh Luma tab through the private browsing surface.</p><button id="open-gn-math" class="primary-button" type="button">Explore GN Math <span aria-hidden="true">↗</span></button></div>
     </article>
     <article class="game-launch-card game-launch-quick">
       <div class="game-art game-art-quick" aria-hidden="true"><span>+</span><span>×</span><span>÷</span></div>
@@ -1394,7 +1565,7 @@ function signIn() {
   $("#browser").hidden = true;
   $("#signin-error").hidden = true;
   $("#invite-token").focus();
-  document.title = "Nightjar — private browsing space";
+  document.title = "Luma — private browsing space";
 }
 
 async function signOut(callServer = true) {
@@ -1475,6 +1646,63 @@ $("#signin-form").addEventListener("submit", async (event) => {
   }
 });
 
+function showAuthView(view) {
+  $("#signin-form").hidden = view !== "token";
+  $("#email-login-form").hidden = view !== "email-login";
+  $("#basic-signup-form").hidden = view !== "signup";
+  $("#signin-error").hidden = true;
+  $("#email-login-error").hidden = true;
+  $("#basic-signup-error").hidden = true;
+}
+
+$$("[data-auth-view]").forEach((button) => button.addEventListener("click", () => showAuthView(button.dataset.authView)));
+
+$("#email-login-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const error = $("#email-login-error");
+  const button = $("button[type=submit]", form);
+  button.disabled = true;
+  error.hidden = true;
+  try {
+    const result = await api("/api/auth/email-login", {
+      method: "POST",
+      body: { email: form.elements.email.value.trim(), password: form.elements.password.value },
+    });
+    form.reset();
+    state.csrf = result.csrf;
+    applyDisplay(result);
+  } catch (failure) {
+    error.textContent = failure.message;
+    error.hidden = false;
+  } finally { button.disabled = false; }
+});
+
+$("#basic-signup-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const error = $("#basic-signup-error");
+  const button = $("button[type=submit]", form);
+  button.disabled = true;
+  error.hidden = true;
+  try {
+    const result = await api("/api/auth/basic-signup", {
+      method: "POST",
+      body: {
+        label: form.elements.label.value.trim(),
+        email: form.elements.email.value.trim(),
+        password: form.elements.password.value,
+      },
+    });
+    form.reset();
+    state.csrf = result.csrf;
+    applyDisplay(result);
+  } catch (failure) {
+    error.textContent = failure.message;
+    error.hidden = false;
+  } finally { button.disabled = false; }
+});
+
 $("#toggle-token").addEventListener("click", () => {
   const input = $("#invite-token");
   const reveal = input.type === "password";
@@ -1501,6 +1729,10 @@ $("#settings-open").addEventListener("click", openSettings);
 $("#theme-toggle").addEventListener("click", () => void cycleTheme());
 $("#help-open").addEventListener("click", openHelp);
 $("#games-open").addEventListener("click", openMathGame);
+$("#notes-open").addEventListener("click", () => void openNotes());
+$("#storage-open").addEventListener("click", () => void openStorage());
+$("#chat-open").addEventListener("click", () => void openChat());
+$("#rank-store-open").addEventListener("click", () => void openRankStore());
 $("#project-area-create").addEventListener("click", () => openProjectAreaDialog());
 $("#signout").addEventListener("click", () => {
   if (confirm("Sign out of this private workspace?")) void signOut(true);

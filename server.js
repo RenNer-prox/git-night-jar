@@ -27,8 +27,9 @@ const ADMIN_SESSION_COOKIE = "nj_admin";
 const MAX_BODY_BYTES = 64 * 1024;
 const SESSION_MAX_AGE_MS = 12 * 60 * 60 * 1000;
 const SESSION_IDLE_MS = SESSION_MAX_AGE_MS;
-const PERMISSIONS = ["browse", "bookmarks", "history", "settings", "assistant", "games", "support"];
-const FEATURES = ["bookmarks", "history", "settings", "assistant", "games", "support"];
+const DESKTOP_RELAY_IDLE_MS = 60_000;
+const PERMISSIONS = ["browse", "bookmarks", "history", "settings", "assistant", "games", "support", "notes", "storage", "chat", "bugs"];
+const FEATURES = ["bookmarks", "history", "settings", "assistant", "games", "support", "notes", "storage", "chat", "bugs"];
 const BASIC_AI_REQUEST_LIMIT = 20;
 const LIMITED_AI_RANKS = new Set(["basic", "basic-plus"]);
 const CUSTOMIZABLE_TOOLBAR_ITEMS = ["bookmarks-open", "history-open", "downloads-open", "assistant-open", "games-open", "open-regular", "theme-toggle", "settings-open", "help-open", "admin-link"];
@@ -38,16 +39,21 @@ const DEFAULT_SITE_CONTROLS = {
   assistantEnabled: true,
 };
 const DEFAULT_RANKS = [
-  { id: "basic", label: "Basic", permissions: ["browse", "assistant"], features: ["assistant"] },
-  { id: "basic-plus", label: "Basic+", permissions: ["browse", "bookmarks", "history", "assistant"], features: ["bookmarks", "history", "assistant"] },
-  { id: "ai", label: "AI", permissions: ["browse", "bookmarks", "history", "assistant"], features: ["bookmarks", "history", "assistant"] },
-  { id: "full-minus", label: "Full-", permissions: ["browse", "bookmarks", "history", "settings", "assistant", "games", "support"], features: ["bookmarks", "history", "settings", "assistant", "games", "support"] },
-  { id: "owner", label: "Owner", permissions: ["browse", "bookmarks", "history", "settings", "assistant", "games", "support"], features: ["bookmarks", "history", "settings", "assistant", "games", "support"] },
+  { id: "basic", label: "Basic", permissions: ["browse", "assistant", "notes", "storage", "chat", "bugs"], features: ["assistant", "notes", "storage", "chat", "bugs"] },
+  { id: "basic-plus", label: "Basic+", permissions: ["browse", "bookmarks", "history", "assistant", "notes", "storage", "chat", "bugs"], features: ["bookmarks", "history", "assistant", "notes", "storage", "chat", "bugs"] },
+  { id: "ai", label: "AI", permissions: ["browse", "bookmarks", "history", "assistant", "notes", "storage", "chat", "bugs"], features: ["bookmarks", "history", "assistant", "notes", "storage", "chat", "bugs"] },
+  { id: "full-minus", label: "Full-", permissions: ["browse", "bookmarks", "history", "settings", "assistant", "games", "support", "notes", "storage", "chat", "bugs"], features: ["bookmarks", "history", "settings", "assistant", "games", "support", "notes", "storage", "chat", "bugs"] },
+  { id: "owner", label: "Owner", permissions: ["browse", "bookmarks", "history", "settings", "assistant", "games", "support", "notes", "storage", "chat", "bugs"], features: ["bookmarks", "history", "settings", "assistant", "games", "support", "notes", "storage", "chat", "bugs"] },
+  { id: "standard", label: "Standard", permissions: ["browse", "bookmarks", "history", "notes", "storage", "chat", "bugs"], features: ["bookmarks", "history", "notes", "storage", "chat", "bugs"] },
+  { id: "with-ai", label: "With AI", permissions: ["browse", "bookmarks", "history", "assistant", "notes", "storage", "chat", "bugs"], features: ["bookmarks", "history", "assistant", "notes", "storage", "chat", "bugs"] },
+  { id: "without-ai", label: "Without AI", permissions: ["browse", "bookmarks", "history", "notes", "storage", "chat", "bugs"], features: ["bookmarks", "history", "notes", "storage", "chat", "bugs"] },
+  { id: "full", label: "Full", permissions: ["browse", "bookmarks", "history", "settings", "assistant", "games", "support", "notes", "storage", "chat", "bugs"], features: ["bookmarks", "history", "settings", "assistant", "games", "support", "notes", "storage", "chat", "bugs"] },
 ];
 const BUILT_IN_RANK_IDS = new Set(DEFAULT_RANKS.map(({ id }) => id));
+const LEGACY_RANK_IDS = new Set(["basic-plus", "ai", "full-minus", "owner"]);
 const DEFAULT_SETTINGS = {
   theme: "dark",
-  accent: "#ff7048",
+  accent: "#75cfff",
   density: "comfortable",
   homepage: "home",
   searchProvider: "duckduckgo",
@@ -354,6 +360,8 @@ function createDatabase(path) {
     CREATE TABLE IF NOT EXISTS accounts (
       id TEXT PRIMARY KEY,
       label TEXT NOT NULL,
+      email TEXT UNIQUE,
+      password_hash TEXT,
       settings_json TEXT NOT NULL,
       permissions_json TEXT NOT NULL,
       features_json TEXT NOT NULL,
@@ -424,7 +432,7 @@ function createDatabase(path) {
     CREATE TABLE IF NOT EXISTS feedback (
       id TEXT PRIMARY KEY,
       account_id TEXT NOT NULL REFERENCES accounts(id),
-      kind TEXT NOT NULL CHECK (kind IN ('support', 'suggestion')),
+      kind TEXT NOT NULL CHECK (kind IN ('support', 'suggestion', 'bug')),
       subject TEXT NOT NULL,
       message TEXT NOT NULL,
       status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'in_progress', 'resolved')),
@@ -441,6 +449,49 @@ function createDatabase(path) {
       UNIQUE(account_id, name)
     );
     CREATE INDEX IF NOT EXISTS project_areas_by_account ON project_areas(account_id, created_at DESC);
+    CREATE TABLE IF NOT EXISTS notes (
+      id TEXT PRIMARY KEY,
+      account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+      title TEXT NOT NULL,
+      content TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS notes_by_account_time ON notes(account_id, updated_at DESC);
+    CREATE TABLE IF NOT EXISTS cloud_files (
+      id TEXT PRIMARY KEY,
+      account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+      name TEXT NOT NULL,
+      mime_type TEXT NOT NULL,
+      content BLOB NOT NULL,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS cloud_files_by_account_time ON cloud_files(account_id, created_at DESC);
+    CREATE TABLE IF NOT EXISTS chat_messages (
+      id TEXT PRIMARY KEY,
+      sender_account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+      recipient_account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+      message TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS chat_thread_by_time ON chat_messages(sender_account_id, recipient_account_id, created_at);
+    CREATE TABLE IF NOT EXISTS chat_blocks (
+      account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+      blocked_account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+      created_at TEXT NOT NULL,
+      PRIMARY KEY(account_id, blocked_account_id)
+    );
+    CREATE TABLE IF NOT EXISTS moderation_events (
+      id TEXT PRIMARY KEY,
+      kind TEXT NOT NULL,
+      actor TEXT NOT NULL,
+      subject_account_id TEXT REFERENCES accounts(id) ON DELETE SET NULL,
+      message_id TEXT,
+      reason TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'resolved', 'dismissed')),
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS moderation_events_by_time ON moderation_events(created_at DESC);
     CREATE TABLE IF NOT EXISTS site_settings (
       key TEXT PRIMARY KEY,
       value_json TEXT NOT NULL,
@@ -461,6 +512,8 @@ function createDatabase(path) {
   }
   const accountColumns = new Set(db.prepare("PRAGMA table_info(accounts)").all().map((column) => column.name));
   if (!accountColumns.has("rank")) db.exec("ALTER TABLE accounts ADD COLUMN rank TEXT NOT NULL DEFAULT 'standard'");
+  if (!accountColumns.has("email")) db.exec("ALTER TABLE accounts ADD COLUMN email TEXT");
+  if (!accountColumns.has("password_hash")) db.exec("ALTER TABLE accounts ADD COLUMN password_hash TEXT");
   const tokenColumns = new Set(db.prepare("PRAGMA table_info(tokens)").all().map((column) => column.name));
   if (!tokenColumns.has("rank")) db.exec("ALTER TABLE tokens ADD COLUMN rank TEXT NOT NULL DEFAULT 'standard'");
   if (!tokenColumns.has("ai_usage_count")) db.exec("ALTER TABLE tokens ADD COLUMN ai_usage_count INTEGER NOT NULL DEFAULT 0");
@@ -506,19 +559,6 @@ function createDatabase(path) {
         db.prepare("UPDATE tokens SET rank = ? WHERE rank = 'owner'").run(safeId);
         db.prepare("UPDATE ranks SET id = ?, label = ? WHERE id = 'owner'").run(safeId, "Legacy owner preset");
       }
-      const migrations = [
-        ["standard", DEFAULT_RANKS.find(({ id }) => id === "basic-plus")],
-        ["without-ai", DEFAULT_RANKS.find(({ id }) => id === "basic-plus")],
-        ["with-ai", DEFAULT_RANKS.find(({ id }) => id === "ai")],
-        ["full", DEFAULT_RANKS.find(({ id }) => id === "full-minus")],
-      ];
-      for (const [oldId, rank] of migrations) {
-        db.prepare("UPDATE accounts SET rank = ?, permissions_json = ?, features_json = ? WHERE rank = ?")
-          .run(rank.id, JSON.stringify(rank.permissions), JSON.stringify(rank.features), oldId);
-        db.prepare("UPDATE tokens SET rank = ?, permissions_json = ? WHERE rank = ?")
-          .run(rank.id, JSON.stringify(rank.permissions), oldId);
-        db.prepare("DELETE FROM ranks WHERE id = ?").run(oldId);
-      }
       const upsertRank = db.prepare(`INSERT INTO ranks(id, label, permissions_json, features_json, created_at)
         VALUES (?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET label = excluded.label,
@@ -535,10 +575,12 @@ function createDatabase(path) {
           db.prepare("UPDATE ranks SET label = ? WHERE id = ?").run(legacyLabel, labelConflict.id);
         }
         upsertRank.run(rank.id, rank.label, JSON.stringify(rank.permissions), JSON.stringify(rank.features), new Date().toISOString());
-        db.prepare("UPDATE accounts SET permissions_json = ?, features_json = ? WHERE rank = ?")
-          .run(JSON.stringify(rank.permissions), JSON.stringify(rank.features), rank.id);
-        db.prepare("UPDATE tokens SET permissions_json = ? WHERE rank = ?")
-          .run(JSON.stringify(rank.permissions), rank.id);
+        if (BUILT_IN_RANK_IDS.has(rank.id)) {
+          db.prepare("UPDATE accounts SET permissions_json = ?, features_json = ? WHERE rank = ?")
+            .run(JSON.stringify(rank.permissions), JSON.stringify(rank.features), rank.id);
+          db.prepare("UPDATE tokens SET permissions_json = ? WHERE rank = ?")
+            .run(JSON.stringify(rank.permissions), rank.id);
+        }
       }
       db.prepare("INSERT INTO schema_migrations(version, applied_at) VALUES (7, CURRENT_TIMESTAMP)").run();
       db.exec("COMMIT");
@@ -551,6 +593,66 @@ function createDatabase(path) {
     const createdAt = new Date().toISOString();
     for (const account of db.prepare("SELECT id FROM accounts").all()) createDefaultProjectAreas(db, account.id, createdAt);
     db.prepare("INSERT INTO schema_migrations(version, applied_at) VALUES (8, CURRENT_TIMESTAMP)").run();
+  }
+  if (!db.prepare("SELECT version FROM schema_migrations WHERE version = 9").get()) {
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      const upsert = db.prepare("INSERT OR IGNORE INTO ranks(id, label, permissions_json, features_json, created_at) VALUES (?, ?, ?, ?, ?)");
+      for (const preset of DEFAULT_RANKS) {
+        upsert.run(preset.id, preset.label, JSON.stringify(preset.permissions), JSON.stringify(preset.features), new Date().toISOString());
+        const rank = db.prepare("SELECT permissions_json, features_json FROM ranks WHERE id = ?").get(preset.id);
+        const permissions = [...new Set([...safeJson(rank.permissions_json, []), ...preset.permissions])];
+        const features = [...new Set([...safeJson(rank.features_json, []), ...preset.features])];
+        db.prepare("UPDATE ranks SET permissions_json = ?, features_json = ? WHERE id = ?")
+          .run(JSON.stringify(permissions), JSON.stringify(features), preset.id);
+        db.prepare("UPDATE accounts SET permissions_json = ?, features_json = ? WHERE rank = ?")
+          .run(JSON.stringify(permissions), JSON.stringify(features), preset.id);
+        db.prepare("UPDATE tokens SET permissions_json = ? WHERE rank = ?")
+          .run(JSON.stringify(permissions), preset.id);
+      }
+      db.prepare("INSERT INTO schema_migrations(version, applied_at) VALUES (9, CURRENT_TIMESTAMP)").run();
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+  if (!db.prepare("SELECT version FROM schema_migrations WHERE version = 10").get()) {
+    db.exec(`
+      BEGIN IMMEDIATE;
+      CREATE TABLE feedback_v10 (
+        id TEXT PRIMARY KEY,
+        account_id TEXT NOT NULL REFERENCES accounts(id),
+        kind TEXT NOT NULL CHECK (kind IN ('support', 'suggestion', 'bug')),
+        subject TEXT NOT NULL,
+        message TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'in_progress', 'resolved')),
+        created_at TEXT NOT NULL
+      );
+      INSERT INTO feedback_v10 SELECT id, account_id, kind, subject, message, status, created_at FROM feedback;
+      DROP TABLE feedback;
+      ALTER TABLE feedback_v10 RENAME TO feedback;
+      CREATE INDEX feedback_by_time ON feedback(created_at DESC);
+      INSERT INTO schema_migrations(version, applied_at) VALUES (10, CURRENT_TIMESTAMP);
+      COMMIT;
+    `);
+  }
+  if (!db.prepare("SELECT version FROM schema_migrations WHERE version = 11").get()) {
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      for (const account of db.prepare("SELECT id, settings_json FROM accounts").all()) {
+        const settings = safeJson(account.settings_json, null);
+        if (typeof settings?.accent === "string" && settings.accent.toLowerCase() === "#ff7048") {
+          settings.accent = DEFAULT_SETTINGS.accent;
+          db.prepare("UPDATE accounts SET settings_json = ? WHERE id = ?").run(JSON.stringify(settings), account.id);
+        }
+      }
+      db.prepare("INSERT INTO schema_migrations(version, applied_at) VALUES (11, CURRENT_TIMESTAMP)").run();
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
   }
   return db;
 }
@@ -645,6 +747,7 @@ export async function runAdminCommand(args, options = {}) {
     }
     if (resource === "ranks" && action === "list" && positional.length <= 2) {
       const items = db.prepare("SELECT id, label, permissions_json, features_json, created_at FROM ranks ORDER BY label").all()
+        .filter((row) => !LEGACY_RANK_IDS.has(row.id))
         .map((row) => ({ ...row, permissions: safeJson(row.permissions_json, []), features: safeJson(row.features_json, []) }));
       return { type: "ranks", items };
     }
@@ -697,7 +800,7 @@ export async function runAdminCommand(args, options = {}) {
       const existingAccount = db.prepare("SELECT * FROM accounts WHERE id = ?").get(accountId);
       if (flags["account-id"] && !existingAccount) throw new Error("That account ID was not found.");
       if (existingAccount?.revoked_at) throw new Error("Revoked accounts cannot receive replacement invitations.");
-      let rankId = flags.rank ?? positional[3] ?? existingAccount?.rank ?? "basic-plus";
+      let rankId = flags.rank ?? positional[3] ?? existingAccount?.rank ?? "basic";
       let rank = db.prepare("SELECT * FROM ranks WHERE id = ?").get(rankId);
       if (!rank && existingAccount && !flags.rank && !positional[3]) {
         rank = { permissions_json: existingAccount.permissions_json, features_json: existingAccount.features_json };
@@ -911,6 +1014,7 @@ export async function createApp(options = {}) {
   const proxySockets = new Map();
   const proxyMaintenanceTimer = setInterval(() => {
     const now = Date.now();
+    expireDesktopRelayIfInactive(now);
     for (const [engineSessionId, record] of rammerheadSessions) {
       const live = db.prepare("SELECT last_seen_at, expires_at FROM sessions WHERE id = ? AND principal = 'user'").get(record.userSessionId);
       if (
@@ -948,6 +1052,34 @@ export async function createApp(options = {}) {
   });
   const aiModel = options.aiModel ?? env("OLLAMA_MODEL", "qwen3:4b");
   const ollamaFetch = options.ollamaFetch ?? globalThis.fetch;
+  const emailApiKey = options.emailApiKey ?? env("RESEND_API_KEY", "");
+  const emailFrom = options.emailFrom ?? env("EMAIL_FROM", "");
+  const feedbackEmail = options.feedbackEmail ?? env("FEEDBACK_EMAIL", "");
+  const emailFetch = options.emailFetch ?? globalThis.fetch;
+  const emailConfigured = Boolean(emailApiKey && emailFrom && feedbackEmail);
+  async function notifyFeedback(subject, text) {
+    if (!emailConfigured) return "not_configured";
+    try {
+      const response = await emailFetch("https://api.resend.com/emails", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${emailApiKey}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ from: emailFrom, to: [feedbackEmail], subject, text }),
+        redirect: "error",
+        signal: AbortSignal.timeout(8000),
+      });
+      if (!response.ok) {
+        console.error(`Luma email notification failed with HTTP ${response.status}.`);
+        return "failed";
+      }
+      return "sent";
+    } catch (error) {
+      console.error(`Luma email notification failed: ${error.message}`);
+      return "failed";
+    }
+  }
   if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$/.test(aiModel)) {
     db.close();
     throw new Error("OLLAMA_MODEL contains unsupported characters.");
@@ -955,6 +1087,62 @@ export async function createApp(options = {}) {
   const aiAutostart = options.aiAutostart ?? env("OLLAMA_AUTOSTART", "1") !== "0";
   const aiState = { status: aiAutostart ? "checking" : "stopped", startedByApp: false, error: "" };
   const desktopSecret = options.desktopSecret ?? env("DESKTOP_COMPANION_SECRET", "");
+  const desktopViewerTickets = new Map();
+  const desktopRelay = {
+    companionLastSeen: 0,
+    ownerSessionId: "",
+    ownerLastSeen: 0,
+    sessionId: "",
+    sessionExpiresAt: 0,
+    sharing: false,
+    input: false,
+    lastFrame: null,
+    lastFrameAt: 0,
+    lastFrameUploadAt: 0,
+    commands: [],
+    pendingCommands: new Map(),
+    usedNonces: new Map(),
+  };
+  function desktopOwnerSessionIsActive(now = Date.now()) {
+    if (!desktopRelay.ownerSessionId) return false;
+    const session = db.prepare("SELECT * FROM sessions WHERE id = ?").get(desktopRelay.ownerSessionId);
+    if (
+      !session ||
+      Date.parse(session.expires_at) <= now ||
+      now - Date.parse(session.last_seen_at) > SESSION_IDLE_MS
+    ) return false;
+    if (session.principal === "admin") return true;
+    if (session.principal !== "user") return false;
+    const account = db.prepare("SELECT rank, revoked_at FROM accounts WHERE id = ?").get(session.account_id);
+    const token = db.prepare("SELECT revoked_at, expires_at FROM tokens WHERE id = ?").get(session.token_id);
+    return Boolean(
+      account?.rank === "owner" &&
+      !account.revoked_at &&
+      token &&
+      !token.revoked_at &&
+      (!token.expires_at || Date.parse(token.expires_at) > now)
+    );
+  }
+  function expireDesktopRelayIfInactive(now = Date.now()) {
+    if (desktopRelay.ownerSessionId && (
+      desktopRelay.sessionExpiresAt <= now ||
+      now - desktopRelay.ownerLastSeen > DESKTOP_RELAY_IDLE_MS ||
+      now - desktopRelay.companionLastSeen > 60_000 ||
+      !desktopOwnerSessionIsActive(now)
+    )) {
+      desktopRelay.commands = [{ id: randomUUID(), sessionId: desktopRelay.sessionId, action: "stop" }];
+      desktopRelay.pendingCommands.clear();
+      desktopRelay.ownerSessionId = "";
+      desktopRelay.ownerLastSeen = 0;
+      desktopRelay.sessionId = "";
+      desktopRelay.sessionExpiresAt = 0;
+      desktopRelay.sharing = false;
+      desktopRelay.input = false;
+      desktopRelay.lastFrame = null;
+      desktopRelay.lastFrameAt = 0;
+      desktopRelay.lastFrameUploadAt = 0;
+    }
+  }
   let ollamaChild = null;
 
   async function ollamaAvailable() {
@@ -1051,7 +1239,7 @@ export async function createApp(options = {}) {
     if (item.count > max) throw new HttpError(429, "Too many attempts. Please wait and try again.", "rate_limited");
   }
 
-  async function readBody(req) {
+  async function readBody(req, maxBytes = MAX_BODY_BYTES) {
     if (!/^application\/json(?:\s*;|$)/i.test(req.headers["content-type"] ?? "")) {
       throw new HttpError(415, "Send application/json requests.");
     }
@@ -1059,7 +1247,7 @@ export async function createApp(options = {}) {
     const chunks = [];
     for await (const chunk of req) {
       length += chunk.length;
-      if (length > MAX_BODY_BYTES) {
+      if (length > maxBytes) {
         req.resume();
         throw new HttpError(413, "Request body is too large.");
       }
@@ -1076,7 +1264,7 @@ export async function createApp(options = {}) {
 
   function requestSession(req) {
     const cookies = parseCookies(req.headers.cookie);
-    const adminPath = req.url?.startsWith("/api/admin/");
+    const adminPath = req.url?.startsWith("/api/admin/") || req.url?.startsWith("/admin/");
     const dashboardPath = req.url?.startsWith("/api/owner/dashboard/");
     const candidates = adminPath || dashboardPath
       ? [[ADMIN_SESSION_COOKIE, cookies[ADMIN_SESSION_COOKIE]], [SESSION_COOKIE, cookies[SESSION_COOKIE]]]
@@ -1126,6 +1314,145 @@ export async function createApp(options = {}) {
     if (!constantEqual(hash(req.headers["x-nj-csrf"] ?? ""), session.csrf_hash)) {
       throw new HttpError(403, "Session verification failed. Refresh and try again.", "csrf_rejected");
     }
+  }
+
+  function activeDesktopOwner(sessionId) {
+    return Boolean(
+      desktopRelay.ownerSessionId === sessionId &&
+      desktopRelay.sessionId &&
+      desktopRelay.sessionExpiresAt > Date.now() &&
+      Date.now() - desktopRelay.ownerLastSeen <= DESKTOP_RELAY_IDLE_MS &&
+      Date.now() - desktopRelay.companionLastSeen <= 60_000 &&
+      desktopOwnerSessionIsActive()
+    );
+  }
+
+  function queueDesktopCommand(action, values = {}) {
+    if (desktopRelay.pendingCommands.size >= 32) {
+      throw new HttpError(429, "The desktop companion is busy. Wait and try again.", "desktop_busy");
+    }
+    const command = { id: randomUUID(), sessionId: desktopRelay.sessionId, action, ...values };
+    desktopRelay.commands.push(command);
+    desktopRelay.pendingCommands.set(command.id, command);
+    return command;
+  }
+
+  async function readRawBody(req, maxBytes) {
+    const contentLength = req.headers["content-length"];
+    if (contentLength !== undefined && (!/^\d+$/.test(contentLength) || Number(contentLength) > maxBytes)) {
+      req.resume();
+      throw new HttpError(413, "Desktop relay request is too large.", "desktop_payload_too_large");
+    }
+    const chunks = [];
+    let length = 0;
+    for await (const chunk of req) {
+      length += chunk.length;
+      if (length > maxBytes) {
+        req.resume();
+        throw new HttpError(413, "Desktop relay request is too large.", "desktop_payload_too_large");
+      }
+      chunks.push(chunk);
+    }
+    return Buffer.concat(chunks);
+  }
+
+  function authenticateDesktopCompanion(req, url, body) {
+    if (!/^[a-f0-9]{64}$/i.test(desktopSecret)) {
+      throw new HttpError(503, "Desktop relay is not configured.", "companion_not_configured");
+    }
+    const timestamp = req.headers["x-nj-desktop-timestamp"];
+    const nonce = req.headers["x-nj-desktop-nonce"];
+    const signature = req.headers["x-nj-desktop-signature"];
+    const milliseconds = Number(timestamp);
+    if (
+      typeof timestamp !== "string" ||
+      !Number.isSafeInteger(milliseconds) ||
+      Math.abs(Date.now() - milliseconds) > 30_000 ||
+      typeof nonce !== "string" ||
+      !/^[A-Za-z0-9_-]{20,80}$/.test(nonce) ||
+      typeof signature !== "string" ||
+      !/^[a-f0-9]{64}$/i.test(signature)
+    ) {
+      throw new HttpError(401, "Desktop companion authentication failed.", "companion_authentication_required");
+    }
+    for (const [oldNonce, expiry] of desktopRelay.usedNonces) {
+      if (expiry <= Date.now()) desktopRelay.usedNonces.delete(oldNonce);
+    }
+    if (desktopRelay.usedNonces.has(nonce)) {
+      throw new HttpError(401, "Desktop companion request was already used.", "companion_request_replayed");
+    }
+    const digest = createHash("sha256").update(body).digest("hex");
+    const message = `${req.method}\n${url.pathname}\n${timestamp}\n${nonce}\n${digest}`;
+    const expected = createHmac("sha256", Buffer.from(desktopSecret, "hex")).update(message).digest("hex");
+    if (!constantEqual(expected, signature.toLowerCase())) {
+      throw new HttpError(401, "Desktop companion authentication failed.", "companion_authentication_required");
+    }
+    desktopRelay.usedNonces.set(nonce, milliseconds + 60_000);
+  }
+
+  async function routeDesktopCompanion(req, res, url) {
+    if (!url.pathname.startsWith("/api/desktop/companion/")) return false;
+    consumeLimit(`desktop-companion-ip:${clientAddress(req)}`, 20, 1000);
+    const body = await readRawBody(req, req.method === "POST" && url.pathname.endsWith("/frame") ? 8 * 1024 * 1024 : 32 * 1024);
+    authenticateDesktopCompanion(req, url, body);
+    consumeLimit(`desktop-companion:${clientAddress(req)}`, 10, 1000);
+    if (req.method === "GET" && url.pathname === "/api/desktop/companion/poll") {
+      desktopRelay.companionLastSeen = Date.now();
+      expireDesktopRelayIfInactive();
+      const command = desktopRelay.commands.shift() ?? null;
+      sendJson(res, 200, {
+        command,
+        paired: activeDesktopOwner(desktopRelay.ownerSessionId),
+        sharing: desktopRelay.sharing,
+        inputEnabled: desktopRelay.input,
+      });
+      return true;
+    }
+    if (req.method === "POST" && url.pathname === "/api/desktop/companion/result") {
+      let result;
+      try {
+        result = JSON.parse(body.toString("utf8"));
+      } catch {
+        throw new HttpError(400, "Companion result must be JSON.", "invalid_companion_result");
+      }
+      if (!result || typeof result !== "object" || typeof result.action !== "string") {
+        throw new HttpError(400, "Companion result is invalid.", "invalid_companion_result");
+      }
+      const command = desktopRelay.pendingCommands.get(result.commandId);
+      if (!command || command.sessionId !== desktopRelay.sessionId || command.action !== result.action || result.sessionId !== command.sessionId) {
+        sendJson(res, 200, { ok: true, stale: true });
+        return true;
+      }
+      desktopRelay.pendingCommands.delete(command.id);
+      desktopRelay.companionLastSeen = Date.now();
+      if (result.action === "start") desktopRelay.sharing = result.ok === true;
+      if (result.action === "enable-input") desktopRelay.input = result.ok === true && desktopRelay.sharing;
+      if (result.action === "stop") {
+        desktopRelay.sharing = false;
+        desktopRelay.input = false;
+        desktopRelay.lastFrame = null;
+        desktopRelay.lastFrameAt = 0;
+        desktopRelay.lastFrameUploadAt = 0;
+      }
+      sendJson(res, 200, { ok: true });
+      return true;
+    }
+    if (req.method === "POST" && url.pathname === "/api/desktop/companion/frame") {
+      if (!desktopRelay.sharing || body.length < 8 || !body.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) {
+        throw new HttpError(409, "No approved desktop share is active.", "desktop_not_sharing");
+      }
+      if (Date.now() - desktopRelay.lastFrameUploadAt < 500) {
+        throw new HttpError(429, "Desktop screen frames are arriving too quickly.", "desktop_frame_rate_limited");
+      }
+      desktopRelay.companionLastSeen = Date.now();
+      desktopRelay.lastFrameUploadAt = Date.now();
+      desktopRelay.lastFrame = body;
+      desktopRelay.lastFrameAt = Date.now();
+      res.writeHead(204, { "Cache-Control": "no-store" });
+      res.end();
+      return true;
+    }
+    throw new HttpError(404, "Desktop companion route not found.", "not_found");
   }
 
   function requirePermission(session, permission) {
@@ -1300,6 +1627,94 @@ export async function createApp(options = {}) {
       return;
     }
 
+    if (method === "POST" && path === "/api/auth/basic-signup") {
+      validateOrigin(req);
+      consumeLimit(`basic-signup:${ip}`, 5, 24 * 60 * 60_000);
+      const body = await readBody(req);
+      const label = typeof body.label === "string" ? body.label.trim() : "";
+      const email = typeof body.email === "string" ? body.email.trim().toLowerCase() : "";
+      const password = typeof body.password === "string" ? body.password : "";
+      if (label.length < 2 || label.length > 40 || /[\u0000-\u001f]/.test(label)) {
+        throw new HttpError(400, "Display name must be between 2 and 40 printable characters.");
+      }
+      if (email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        throw new HttpError(400, "Enter a valid email address.");
+      }
+      if (password.length < 12 || password.length > 128) {
+        throw new HttpError(400, "Password must be between 12 and 128 characters.");
+      }
+      const rank = db.prepare("SELECT permissions_json, features_json FROM ranks WHERE id = 'basic'").get();
+      const accountId = randomUUID();
+      const tokenId = randomUUID();
+      const tokenValue = randomBytes(32).toString("base64url");
+      const now = new Date().toISOString();
+      try {
+        db.exec("BEGIN IMMEDIATE");
+        db.prepare(`INSERT INTO accounts(id, label, email, password_hash, settings_json, permissions_json, features_json, rank, created_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, 'basic', ?)`)
+          .run(accountId, label, email, await hashPassword(password), JSON.stringify(DEFAULT_SETTINGS),
+            rank.permissions_json, rank.features_json, now);
+        db.prepare(`INSERT INTO tokens(id, account_id, token_hash, label, permissions_json, rank, usage_limit, created_at, last_used_at)
+          VALUES (?, ?, ?, 'Free Basic account sign-in', ?, 'basic', NULL, ?, ?)`)
+          .run(tokenId, accountId, hash(tokenValue), rank.permissions_json, now, now);
+        createDefaultProjectAreas(db, accountId, now);
+        const auth = newSession("user", accountId, tokenId);
+        db.exec("COMMIT");
+        audit(db, label, "account.basic_signup", accountId, {}, ip);
+        sendJson(res, 201, {
+          authenticated: true,
+          account: {
+            id: accountId, label, rank: "basic",
+            settings: DEFAULT_SETTINGS,
+            permissions: safeJson(rank.permissions_json, []),
+            features: safeJson(rank.features_json, []),
+          },
+          csrf: auth.csrf,
+        }, { "Set-Cookie": cookieHeader(auth.raw, config.secureCookie) });
+      } catch (error) {
+        if (db.isTransaction) db.exec("ROLLBACK");
+        if (error.code === "ERR_SQLITE_ERROR" && /UNIQUE/.test(error.message)) {
+          throw new HttpError(409, "An account already uses that email address.", "email_exists");
+        }
+        throw error;
+      }
+      return;
+    }
+
+    if (method === "POST" && path === "/api/auth/email-login") {
+      validateOrigin(req);
+      consumeLimit(`email-login:${ip}`, userLoginLimit, 5 * 60_000);
+      const body = await readBody(req);
+      const email = typeof body.email === "string" ? body.email.trim().toLowerCase() : "";
+      const password = typeof body.password === "string" ? body.password : "";
+      const account = db.prepare("SELECT * FROM accounts WHERE email = ?").get(email);
+      if (!account || !account.password_hash || account.revoked_at || !(await verifyPassword(password, account.password_hash))) {
+        throw new HttpError(401, "Email or password was not recognized.", "invalid_credentials");
+      }
+      const token = db.prepare("SELECT * FROM tokens WHERE account_id = ? AND revoked_at IS NULL ORDER BY created_at DESC LIMIT 1").get(account.id);
+      if (!token) throw new HttpError(401, "Account access is no longer active.", "account_unavailable");
+      const live = db.prepare("SELECT id FROM sessions WHERE account_id = ? AND principal = 'user'").all(account.id)
+        .filter((item) => {
+          const current = db.prepare("SELECT last_seen_at, expires_at FROM sessions WHERE id = ?").get(item.id);
+          return current && Date.now() - Date.parse(current.last_seen_at) <= SESSION_IDLE_MS && Date.parse(current.expires_at) > Date.now();
+        });
+      if (live.length) throw new HttpError(409, "This account is already signed in. Sign out of the other browser first.", "account_session_active");
+      db.prepare("DELETE FROM sessions WHERE account_id = ?").run(account.id);
+      const auth = newSession("user", account.id, token.id);
+      audit(db, account.label, "session.email_login", account.id, {}, ip);
+      sendJson(res, 200, {
+        authenticated: true,
+        account: {
+          id: account.id, label: account.label, rank: account.rank,
+          settings: safeJson(account.settings_json, DEFAULT_SETTINGS),
+          permissions: safeJson(account.permissions_json, []),
+          features: safeJson(account.features_json, []),
+        },
+        csrf: auth.csrf,
+      }, { "Set-Cookie": cookieHeader(auth.raw, config.secureCookie) });
+      return;
+    }
+
     if (method === "POST" && path === "/api/auth/login") {
       validateOrigin(req);
       consumeLimit(`user:${ip}`, userLoginLimit, 5 * 60_000);
@@ -1345,27 +1760,72 @@ export async function createApp(options = {}) {
 
     if (method === "POST" && path === "/api/feedback") {
       const user = requirePrincipal(session, "user");
-      requirePermission(user, "support");
       requireCsrf(req, user);
       const body = await readBody(req);
       const kind = body.kind;
       const subject = typeof body.subject === "string" ? body.subject.trim() : "";
       const message = typeof body.message === "string" ? body.message.trim() : "";
-      if (!["support", "suggestion"].includes(kind)) throw new HttpError(400, "Choose support or suggestion.");
+      if (!["support", "suggestion", "bug"].includes(kind)) throw new HttpError(400, "Choose support, suggestion, or bug report.");
+      if (kind === "support") requirePermission(user, "support");
+      if (kind === "bug") requirePermission(user, "bugs");
       if (subject.length < 4 || subject.length > 120) throw new HttpError(400, "Subject must be between 4 and 120 characters.");
       if (message.length < 10 || message.length > 4000) throw new HttpError(400, "Message must be between 10 and 4000 characters.");
+      consumeLimit(`feedback:${user.account_id}`, 5, 60 * 60_000);
       const id = randomUUID();
       const now = new Date().toISOString();
       db.prepare("INSERT INTO feedback(id, account_id, kind, subject, message, created_at) VALUES (?, ?, ?, ?, ?, ?)")
         .run(id, user.account_id, kind, subject, message, now);
       audit(db, user.account.label, `feedback.${kind}.submitted`, id, {}, ip);
-      sendJson(res, 201, { id, status: "open", createdAt: now });
+      const emailStatus = await notifyFeedback(
+        `Luma ${kind}: ${subject}`,
+        `A ${kind} was submitted in Luma.\nAccount: ${user.account.label}\nSubject: ${subject}\n\n${message}`,
+      );
+      sendJson(res, 201, { id, status: "open", createdAt: now, emailNotification: emailStatus });
+      return;
+    }
+
+    if (method === "GET" && path === "/api/rank-store") {
+      const items = db.prepare("SELECT id, label, permissions_json, features_json FROM ranks WHERE id IN ('basic', 'full', 'standard', 'with-ai', 'without-ai') ORDER BY CASE id WHEN 'basic' THEN 0 WHEN 'standard' THEN 1 WHEN 'without-ai' THEN 2 WHEN 'with-ai' THEN 3 WHEN 'full' THEN 4 ELSE 5 END, label")
+        .all().map((row) => ({
+          id: row.id,
+          label: row.label,
+          permissions: safeJson(row.permissions_json, []),
+          features: safeJson(row.features_json, []),
+          price: row.id === "basic" ? 0 : null,
+          available: row.id === "basic",
+        }));
+      sendJson(res, 200, {
+        items,
+        checkoutConfigured: false,
+        message: "Basic is free. Paid rank checkout is not configured; higher ranks remain available by owner-issued invitation.",
+      });
+      return;
+    }
+
+    if (method === "POST" && path === "/api/rank-store/request") {
+      const user = requirePrincipal(session, "user");
+      requireCsrf(req, user);
+      const body = await readBody(req);
+      if (!["full", "standard", "with-ai", "without-ai"].includes(body.rank)) {
+        throw new HttpError(400, "Choose an upgrade rank from the store.");
+      }
+      const rank = db.prepare("SELECT label FROM ranks WHERE id = ?").get(body.rank);
+      if (!rank) throw new HttpError(404, "That rank is not available.", "rank_not_found");
+      consumeLimit(`rank-request:${user.account_id}`, 3, 24 * 60 * 60_000);
+      const id = randomUUID();
+      const now = new Date().toISOString();
+      db.prepare("INSERT INTO feedback(id, account_id, kind, subject, message, created_at) VALUES (?, ?, 'suggestion', ?, ?, ?)")
+        .run(id, user.account_id, `Rank upgrade request: ${rank.label}`, `Account requested access to ${rank.label}. No payment was collected.`, now);
+      audit(db, user.account.label, "rank.upgrade_requested", id, { rank: body.rank }, ip);
+      await notifyFeedback(`Luma rank request: ${rank.label}`, `Account ${user.account.label} requested ${rank.label}. No payment was collected.`);
+      sendJson(res, 201, { requested: true, checkoutConfigured: false, message: "Request sent to the owner; no payment was collected." });
       return;
     }
 
     if (method === "GET" && path === "/api/admin/ranks") {
       requireOwner(session);
       const items = db.prepare("SELECT id, label, permissions_json, features_json, created_at FROM ranks ORDER BY label").all()
+        .filter((row) => !LEGACY_RANK_IDS.has(row.id))
         .map((row) => ({
           id: row.id,
           label: row.label,
@@ -1435,6 +1895,52 @@ export async function createApp(options = {}) {
       if (!result.changes) throw new HttpError(404, "Feedback entry not found.", "not_found");
       audit(db, "owner", "feedback.status_changed", feedbackStatusMatch[1], { status: body.status }, ip);
       sendJson(res, 200, { ok: true });
+      return;
+    }
+
+    if (method === "GET" && path === "/api/admin/moderation") {
+      requireOwner(session);
+      const items = db.prepare(`SELECT m.id, m.kind, m.actor, m.subject_account_id, m.message_id, m.reason, m.status, m.created_at,
+        target.label AS subject_label, reporter.label AS reporter_label
+        FROM moderation_events m
+        LEFT JOIN accounts target ON target.id = m.subject_account_id
+        LEFT JOIN accounts reporter ON reporter.id = m.actor
+        ORDER BY m.created_at DESC LIMIT 200`).all().map((row) => ({
+        id: row.id,
+        kind: row.kind,
+        reporterLabel: row.reporter_label ?? "",
+        subjectAccountId: row.subject_account_id,
+        subjectLabel: row.subject_label ?? "Deleted account",
+        messageId: row.message_id,
+        reason: row.reason,
+        status: row.status,
+        createdAt: row.created_at,
+      }));
+      sendJson(res, 200, { items });
+      return;
+    }
+
+    const moderationMatch = path.match(/^\/api\/admin\/moderation\/([0-9a-f-]{36})$/i);
+    if (method === "PATCH" && moderationMatch) {
+      const admin = requireOwner(session);
+      requireCsrf(req, admin);
+      const body = await readBody(req);
+      if (!["resolved", "dismissed"].includes(body.status)) {
+        throw new HttpError(400, "Choose resolved or dismissed.");
+      }
+      const event = db.prepare("SELECT id, kind, subject_account_id FROM moderation_events WHERE id = ?").get(moderationMatch[1]);
+      if (!event) throw new HttpError(404, "Moderation entry not found.", "not_found");
+      db.prepare("UPDATE moderation_events SET status = ? WHERE id = ?").run(body.status, event.id);
+      if (body.ban === true && event.subject_account_id) {
+        db.prepare("UPDATE accounts SET revoked_at = COALESCE(revoked_at, ?) WHERE id = ?").run(new Date().toISOString(), event.subject_account_id);
+        revokeAccount(event.subject_account_id, "moderation_ban", ip, "owner");
+        const banId = randomUUID();
+        db.prepare(`INSERT INTO moderation_events(id, kind, actor, subject_account_id, reason, status, created_at)
+          VALUES (?, 'account_ban', 'owner', ?, ?, 'resolved', ?)`)
+          .run(banId, event.subject_account_id, `Banned after moderation event ${event.id}`, new Date().toISOString());
+      }
+      audit(db, "owner", body.ban === true ? "moderation.account_banned" : "moderation.report_updated", event.id, { status: body.status, ban: body.ban === true }, ip);
+      sendJson(res, 200, { updated: true, banned: body.ban === true });
       return;
     }
 
@@ -1556,6 +2062,212 @@ export async function createApp(options = {}) {
           features: safeJson(session.account.features_json, []),
         },
       });
+      return;
+    }
+
+    if (path === "/api/notes") {
+      const user = requirePrincipal(session, "user");
+      requirePermission(user, "notes");
+      if (method === "GET") {
+        const items = db.prepare("SELECT id, title, content, created_at, updated_at FROM notes WHERE account_id = ? ORDER BY updated_at DESC LIMIT 50")
+          .all(user.account_id).map((row) => ({
+            id: row.id, title: row.title, content: row.content, createdAt: row.created_at, updatedAt: row.updated_at,
+          }));
+        sendJson(res, 200, { items });
+        return;
+      }
+      if (method !== "POST") throw new HttpError(405, "Method not allowed.");
+      requireCsrf(req, user);
+      const body = await readBody(req);
+      const title = typeof body.title === "string" ? body.title.trim() : "";
+      const content = typeof body.content === "string" ? body.content : "";
+      if (!title || title.length > 120 || content.length > 20_000) {
+        throw new HttpError(400, "Notes need a title of 1–120 characters and up to 20,000 characters of text.");
+      }
+      if (db.prepare("SELECT COUNT(*) AS count FROM notes WHERE account_id = ?").get(user.account_id).count >= 50) {
+        throw new HttpError(413, "This account has reached its limit of 50 notes.", "notes_quota_exceeded");
+      }
+      const id = randomUUID();
+      const now = new Date().toISOString();
+      db.prepare("INSERT INTO notes(id, account_id, title, content, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)")
+        .run(id, user.account_id, title, content, now, now);
+      sendJson(res, 201, { item: { id, title, content, createdAt: now, updatedAt: now } });
+      return;
+    }
+
+    const noteMatch = path.match(/^\/api\/notes\/([0-9a-f-]{36})$/i);
+    if (noteMatch) {
+      const user = requirePrincipal(session, "user");
+      requirePermission(user, "notes");
+      const current = db.prepare("SELECT id, title, content, created_at FROM notes WHERE id = ? AND account_id = ?")
+        .get(noteMatch[1], user.account_id);
+      if (!current) throw new HttpError(404, "Note not found.", "not_found");
+      if (method === "DELETE") {
+        requireCsrf(req, user);
+        db.prepare("DELETE FROM notes WHERE id = ? AND account_id = ?").run(current.id, user.account_id);
+        sendJson(res, 200, { deleted: true });
+        return;
+      }
+      if (method !== "PATCH") throw new HttpError(405, "Method not allowed.");
+      requireCsrf(req, user);
+      const body = await readBody(req);
+      const title = body.title === undefined ? current.title : (typeof body.title === "string" ? body.title.trim() : "");
+      const content = body.content === undefined ? current.content : body.content;
+      if (!title || title.length > 120 || typeof content !== "string" || content.length > 20_000) {
+        throw new HttpError(400, "Notes need a title of 1–120 characters and up to 20,000 characters of text.");
+      }
+      const updatedAt = new Date().toISOString();
+      db.prepare("UPDATE notes SET title = ?, content = ?, updated_at = ? WHERE id = ? AND account_id = ?")
+        .run(title, content, updatedAt, current.id, user.account_id);
+      sendJson(res, 200, { item: { id: current.id, title, content, createdAt: current.created_at, updatedAt } });
+      return;
+    }
+
+    if (path === "/api/storage") {
+      const user = requirePrincipal(session, "user");
+      requirePermission(user, "storage");
+      if (method === "GET") {
+        const items = db.prepare("SELECT id, name, mime_type, length(content) AS size, created_at FROM cloud_files WHERE account_id = ? ORDER BY created_at DESC LIMIT 200")
+          .all(user.account_id).map((row) => ({
+            id: row.id, name: row.name, type: row.mime_type, size: row.size, createdAt: row.created_at,
+          }));
+        const usedBytes = db.prepare("SELECT COALESCE(SUM(length(content)), 0) AS bytes FROM cloud_files WHERE account_id = ?").get(user.account_id).bytes;
+        sendJson(res, 200, { items, usedBytes, quotaBytes: 10 * 1024 * 1024 });
+        return;
+      }
+      if (method !== "POST") throw new HttpError(405, "Method not allowed.");
+      requireCsrf(req, user);
+      const body = await readBody(req, 2 * 1024 * 1024);
+      const name = typeof body.name === "string" ? body.name.trim().replace(/[\\/\u0000-\u001f]/g, "_") : "";
+      const allowedTypes = new Set(["text/plain", "application/pdf", "application/json", "image/png", "image/jpeg", "image/webp"]);
+      if (!name || name.length > 120 || typeof body.type !== "string" || !allowedTypes.has(body.type) || typeof body.content !== "string" || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(body.content)) {
+        throw new HttpError(400, "Choose a supported file (text, PDF, JSON, PNG, JPEG, or WebP) with a valid name.");
+      }
+      const content = Buffer.from(body.content, "base64");
+      if (!content.length || content.length > 1024 * 1024 || content.toString("base64") !== body.content) {
+        throw new HttpError(413, "Files must be between 1 byte and 1 MB.", "file_size_limit");
+      }
+      const usedBytes = db.prepare("SELECT COALESCE(SUM(length(content)), 0) AS bytes FROM cloud_files WHERE account_id = ?").get(user.account_id).bytes;
+      if (usedBytes + content.length > 10 * 1024 * 1024) {
+        throw new HttpError(413, "This account has reached its 10 MB cloud storage quota.", "storage_quota_exceeded");
+      }
+      const id = randomUUID();
+      const now = new Date().toISOString();
+      db.prepare("INSERT INTO cloud_files(id, account_id, name, mime_type, content, created_at) VALUES (?, ?, ?, ?, ?, ?)")
+        .run(id, user.account_id, name, body.type, content, now);
+      sendJson(res, 201, { item: { id, name, type: body.type, size: content.length, createdAt: now } });
+      return;
+    }
+
+    const cloudFileMatch = path.match(/^\/api\/storage\/([0-9a-f-]{36})(?:\/download)?$/i);
+    if (cloudFileMatch) {
+      const user = requirePrincipal(session, "user");
+      requirePermission(user, "storage");
+      const file = db.prepare("SELECT id, name, mime_type, content FROM cloud_files WHERE id = ? AND account_id = ?")
+        .get(cloudFileMatch[1], user.account_id);
+      if (!file) throw new HttpError(404, "File not found.", "not_found");
+      if (method === "DELETE" && !path.endsWith("/download")) {
+        requireCsrf(req, user);
+        db.prepare("DELETE FROM cloud_files WHERE id = ? AND account_id = ?").run(file.id, user.account_id);
+        sendJson(res, 200, { deleted: true });
+        return;
+      }
+      if (method !== "GET") throw new HttpError(405, "Method not allowed.");
+      const safeName = file.name.replace(/["\r\n]/g, "_");
+      res.writeHead(200, {
+        "Content-Type": file.mime_type,
+        "Content-Length": file.content.length,
+        "Content-Disposition": `attachment; filename="${safeName}"`,
+        "Cache-Control": "no-store",
+        "X-Content-Type-Options": "nosniff",
+      });
+      res.end(file.content);
+      return;
+    }
+
+    if (path === "/api/chat/contacts") {
+      const user = requirePrincipal(session, "user");
+      requirePermission(user, "chat");
+      if (method !== "GET") throw new HttpError(405, "Method not allowed.");
+      const items = db.prepare(`SELECT id, label, rank FROM accounts
+        WHERE is_friend = 1 AND revoked_at IS NULL AND id != ? ORDER BY label LIMIT 100`).all(user.account_id);
+      sendJson(res, 200, { items });
+      return;
+    }
+
+    if (path === "/api/chat/messages") {
+      const user = requirePrincipal(session, "user");
+      requirePermission(user, "chat");
+      const body = method === "POST" ? await readBody(req) : null;
+      const peerId = method === "GET" ? url.searchParams.get("peer") : body?.peer;
+      if (typeof peerId !== "string" || !/^[0-9a-f-]{36}$/i.test(peerId)) {
+        throw new HttpError(400, "Choose an available chat contact.");
+      }
+      const peer = db.prepare("SELECT id FROM accounts WHERE id = ? AND is_friend = 1 AND revoked_at IS NULL").get(peerId);
+      if (!peer || peer.id === user.account_id) throw new HttpError(404, "Chat contact not found.", "not_found");
+      const blocked = db.prepare(`SELECT 1 FROM chat_blocks WHERE
+        (account_id = ? AND blocked_account_id = ?) OR (account_id = ? AND blocked_account_id = ?)`)
+        .get(user.account_id, peerId, peerId, user.account_id);
+      if (blocked) throw new HttpError(403, "This chat is blocked.", "chat_blocked");
+      if (method === "GET") {
+        const items = db.prepare(`SELECT id, sender_account_id, recipient_account_id, message, created_at FROM chat_messages
+          WHERE (sender_account_id = ? AND recipient_account_id = ?) OR (sender_account_id = ? AND recipient_account_id = ?)
+          ORDER BY created_at DESC LIMIT 100`).all(user.account_id, peerId, peerId, user.account_id).reverse();
+        sendJson(res, 200, { items });
+        return;
+      }
+      if (method !== "POST") throw new HttpError(405, "Method not allowed.");
+      requireCsrf(req, user);
+      const message = typeof body.message === "string" ? body.message.trim() : "";
+      if (!message || message.length > 2000 || /\u0000/.test(message)) throw new HttpError(400, "Chat messages must contain 1–2,000 characters.");
+      consumeLimit(`chat:${user.account_id}`, 30, 60_000);
+      const id = randomUUID();
+      const createdAt = new Date().toISOString();
+      db.prepare("INSERT INTO chat_messages(id, sender_account_id, recipient_account_id, message, created_at) VALUES (?, ?, ?, ?, ?)")
+        .run(id, user.account_id, peerId, message, createdAt);
+      sendJson(res, 201, { item: { id, senderAccountId: user.account_id, recipientAccountId: peerId, message, createdAt } });
+      return;
+    }
+
+    const chatBlockMatch = path.match(/^\/api\/chat\/blocks\/([0-9a-f-]{36})$/i);
+    if (chatBlockMatch) {
+      const user = requirePrincipal(session, "user");
+      requirePermission(user, "chat");
+      requireCsrf(req, user);
+      const peer = db.prepare("SELECT id FROM accounts WHERE id = ? AND is_friend = 1 AND revoked_at IS NULL").get(chatBlockMatch[1]);
+      if (!peer || peer.id === user.account_id) throw new HttpError(404, "Chat contact not found.", "not_found");
+      if (method === "POST") {
+        db.prepare("INSERT OR IGNORE INTO chat_blocks(account_id, blocked_account_id, created_at) VALUES (?, ?, ?)")
+          .run(user.account_id, peer.id, new Date().toISOString());
+        sendJson(res, 200, { blocked: true });
+        return;
+      }
+      if (method === "DELETE") {
+        db.prepare("DELETE FROM chat_blocks WHERE account_id = ? AND blocked_account_id = ?").run(user.account_id, peer.id);
+        sendJson(res, 200, { blocked: false });
+        return;
+      }
+      throw new HttpError(405, "Method not allowed.");
+    }
+
+    if (method === "POST" && path === "/api/chat/report") {
+      const user = requirePrincipal(session, "user");
+      requirePermission(user, "chat");
+      requireCsrf(req, user);
+      const body = await readBody(req);
+      const reason = typeof body.reason === "string" ? body.reason.trim() : "";
+      if (typeof body.messageId !== "string" || !/^[0-9a-f-]{36}$/i.test(body.messageId) || reason.length < 5 || reason.length > 500) {
+        throw new HttpError(400, "Choose a chat message and provide a 5–500 character report reason.");
+      }
+      const message = db.prepare("SELECT sender_account_id, recipient_account_id FROM chat_messages WHERE id = ? AND (sender_account_id = ? OR recipient_account_id = ?)")
+        .get(body.messageId, user.account_id, user.account_id);
+      if (!message || message.sender_account_id === user.account_id) throw new HttpError(404, "Reportable message not found.", "not_found");
+      const id = randomUUID();
+      const now = new Date().toISOString();
+      db.prepare(`INSERT INTO moderation_events(id, kind, actor, subject_account_id, message_id, reason, created_at)
+        VALUES (?, 'chat_report', ?, ?, ?, ?, ?)`)
+        .run(id, user.account_id, message.sender_account_id, body.messageId, reason, now);
+      sendJson(res, 201, { reported: true, id });
       return;
     }
 
@@ -1685,6 +2397,150 @@ export async function createApp(options = {}) {
       return;
     }
 
+    if (method === "POST" && path === "/api/admin/desktop/relay/pair") {
+      const admin = requireOwner(session);
+      requireCsrf(req, admin);
+      if (!/^[a-f0-9]{64}$/i.test(desktopSecret)) {
+        throw new HttpError(503, "Set DESKTOP_COMPANION_SECRET in .env before pairing the desktop companion.", "companion_not_configured");
+      }
+      if (Date.now() - desktopRelay.companionLastSeen > 60_000) {
+        throw new HttpError(503, "The desktop companion is not connected to Nightjar. Start it on the Linux PC first.", "companion_offline");
+      }
+      if (
+        desktopRelay.ownerSessionId &&
+        desktopRelay.sessionExpiresAt > Date.now() &&
+        Date.now() - desktopRelay.ownerLastSeen <= DESKTOP_RELAY_IDLE_MS &&
+        desktopRelay.ownerSessionId !== admin.id
+      ) {
+        throw new HttpError(409, "The companion is already paired to another owner session.", "companion_already_paired");
+      }
+      if (activeDesktopOwner(admin.id)) {
+        sendJson(res, 200, { paired: true, sharing: desktopRelay.sharing, inputEnabled: desktopRelay.input });
+        return;
+      }
+      desktopRelay.ownerSessionId = admin.id;
+      desktopRelay.ownerLastSeen = Date.now();
+      desktopRelay.sessionId = randomBytes(24).toString("base64url");
+      desktopRelay.sessionExpiresAt = Date.now() + 4 * 60 * 60 * 1000;
+      desktopRelay.sharing = false;
+      desktopRelay.input = false;
+      desktopRelay.lastFrame = null;
+      desktopRelay.lastFrameAt = 0;
+      desktopRelay.lastFrameUploadAt = 0;
+      desktopRelay.commands = [];
+      desktopRelay.pendingCommands.clear();
+      audit(db, "owner", "desktop.relay_paired", "local-companion", {}, ip);
+      sendJson(res, 200, { paired: true, sharing: false, inputEnabled: false });
+      return;
+    }
+
+    if (path.startsWith("/api/admin/desktop/relay/")) {
+      const admin = requireOwner(session);
+      const ownsRelay = activeDesktopOwner(admin.id);
+      if (!ownsRelay && path !== "/api/admin/desktop/relay/status") {
+        throw new HttpError(401, "Pair the connected desktop companion first.", "companion_not_paired");
+      }
+      if (method === "GET" && path === "/api/admin/desktop/relay/status") {
+        sendJson(res, 200, {
+          companionOnline: Date.now() - desktopRelay.companionLastSeen <= 60_000,
+          paired: ownsRelay,
+          sharing: ownsRelay && desktopRelay.sharing,
+          inputEnabled: ownsRelay && desktopRelay.input,
+        });
+        return;
+      }
+      if (method === "GET" && path === "/api/admin/desktop/relay/frame") {
+        if (!desktopRelay.sharing) throw new HttpError(409, "Screen sharing is not active.", "desktop_not_sharing");
+        consumeLimit(`desktop-frame:${admin.id}`, 4, 1000);
+        if (!desktopRelay.lastFrame || Date.now() - desktopRelay.lastFrameAt > 5000) {
+          throw new HttpError(503, "Waiting for the Linux desktop companion to send a screen frame.", "desktop_frame_pending");
+        }
+        res.writeHead(200, {
+          "Content-Type": "image/png",
+          "Content-Length": desktopRelay.lastFrame.length,
+          "Cache-Control": "no-store",
+          "X-Content-Type-Options": "nosniff",
+        });
+        res.end(desktopRelay.lastFrame);
+        return;
+      }
+      if (method !== "POST") throw new HttpError(405, "Method not allowed.");
+      requireCsrf(req, admin);
+      const body = await readBody(req);
+      if (path === "/api/admin/desktop/relay/heartbeat") {
+        desktopRelay.ownerLastSeen = Date.now();
+        sendJson(res, 200, {
+          paired: true,
+          sharing: desktopRelay.sharing,
+          inputEnabled: desktopRelay.input,
+        });
+        return;
+      }
+      if (path === "/api/admin/desktop/relay/start") {
+        if (!desktopRelay.sharing && ![...desktopRelay.pendingCommands.values()].some((command) => command.action === "start")) {
+          queueDesktopCommand("start");
+        }
+        sendJson(res, 202, { pending: !desktopRelay.sharing, sharing: desktopRelay.sharing });
+        return;
+      }
+      if (path === "/api/admin/desktop/relay/enable-input") {
+        if (!desktopRelay.sharing) throw new HttpError(409, "Start screen sharing first.", "desktop_not_sharing");
+        if (!desktopRelay.input && ![...desktopRelay.pendingCommands.values()].some((command) => command.action === "enable-input")) {
+          queueDesktopCommand("enable-input");
+        }
+        sendJson(res, 202, { pending: !desktopRelay.input, inputEnabled: desktopRelay.input });
+        return;
+      }
+      if (path === "/api/admin/desktop/relay/input") {
+        consumeLimit(`desktop-input:${admin.id}`, 50, 1000);
+        if (!desktopRelay.sharing || !desktopRelay.input) {
+          throw new HttpError(403, "Local approval for remote input is not active.", "desktop_input_not_approved");
+        }
+        if (desktopRelay.commands.filter((command) => command.action === "input").length >= 20) {
+          throw new HttpError(429, "Desktop input is being sent too quickly.", "desktop_input_rate_limited");
+        }
+        if (
+          !body ||
+          typeof body.action !== "string" ||
+          !["move", "click", "key", "type"].includes(body.action)
+        ) throw new HttpError(400, "Choose a supported pointer, key, or text action.", "invalid_desktop_input");
+        if (body.action === "move" || body.action === "click") {
+          if (!Number.isInteger(body.x) || !Number.isInteger(body.y) || body.x < 0 || body.x > 16384 || body.y < 0 || body.y > 16384) {
+            throw new HttpError(400, "Pointer coordinates are outside the allowed range.", "invalid_desktop_input");
+          }
+        }
+        if (body.action === "click" && !["left", "right", "middle"].includes(body.button ?? "left")) {
+          throw new HttpError(400, "Choose left, right, or middle click.", "invalid_desktop_input");
+        }
+        if (body.action === "key" && !["escape", "backspace", "tab", "enter", "space", "home", "up", "page-up", "left", "right", "end", "down", "page-down"].includes(body.key)) {
+          throw new HttpError(400, "That key is not available for remote input.", "invalid_desktop_input");
+        }
+        if (body.action === "type" && (typeof body.text !== "string" || ![...body.text].length || [...body.text].length > 120 || [...body.text].some((character) => /\p{C}/u.test(character)))) {
+          throw new HttpError(400, "Text must contain 1–120 printable characters.", "invalid_desktop_input");
+        }
+        queueDesktopCommand("input", { input: body });
+        sendJson(res, 202, { queued: true });
+        return;
+      }
+      if (path === "/api/admin/desktop/relay/stop") {
+        const stopCommand = queueDesktopCommand("stop");
+        desktopRelay.pendingCommands.delete(stopCommand.id);
+        desktopRelay.ownerSessionId = "";
+        desktopRelay.ownerLastSeen = 0;
+        desktopRelay.sessionId = "";
+        desktopRelay.sessionExpiresAt = 0;
+        desktopRelay.sharing = false;
+        desktopRelay.input = false;
+        desktopRelay.lastFrame = null;
+        desktopRelay.lastFrameAt = 0;
+        desktopRelay.lastFrameUploadAt = 0;
+        audit(db, "owner", "desktop.relay_stopped", "local-companion", {}, ip);
+        sendJson(res, 200, { stopped: true });
+        return;
+      }
+      throw new HttpError(404, "Desktop relay route not found.", "not_found");
+    }
+
     if (method === "POST" && path === "/api/admin/desktop/ticket") {
       const admin = requireOwner(session);
       requireCsrf(req, admin);
@@ -1700,6 +2556,24 @@ export async function createApp(options = {}) {
       const signature = createHmac("sha256", desktopSecret).update(payload).digest("base64url");
       audit(db, "owner", "desktop.pairing_ticket_issued", "local-companion", { expiresInSeconds: 90 }, ip);
       sendJson(res, 200, { ticket: `${payload}.${signature}`, expiresInSeconds: 90 });
+      return;
+    }
+
+    if (method === "POST" && path === "/api/admin/desktop/viewer-ticket") {
+      const admin = requireOwner(session);
+      requireCsrf(req, admin);
+      if (!/^[a-f0-9]{64}$/i.test(desktopSecret)) {
+        throw new HttpError(503, "Set DESKTOP_COMPANION_SECRET in .env before opening the desktop viewer.", "companion_not_configured");
+      }
+      consumeLimit(`desktop-viewer-ticket:${admin.id}`, 4, 60_000);
+      const now = Date.now();
+      for (const [ticketHash, ticket] of desktopViewerTickets) {
+        if (ticket.expiresAt <= now) desktopViewerTickets.delete(ticketHash);
+      }
+      const ticket = randomBytes(32).toString("base64url");
+      desktopViewerTickets.set(hash(ticket), { ownerSessionId: admin.id, expiresAt: now + 60_000 });
+      audit(db, "owner", "desktop.viewer_ticket_issued", "local-companion", { expiresInSeconds: 60 }, ip);
+      sendJson(res, 200, { url: `/admin/desktop-viewer?ticket=${encodeURIComponent(ticket)}`, expiresInSeconds: 60 });
       return;
     }
 
@@ -1807,8 +2681,12 @@ export async function createApp(options = {}) {
       const account = db.prepare("SELECT id, revoked_at FROM accounts WHERE id = ?").get(revokeAccountMatch[1]);
       if (!account) throw new HttpError(404, "Account not found.", "not_found");
       if (!account.revoked_at) {
-        db.prepare("UPDATE accounts SET revoked_at = ? WHERE id = ?").run(new Date().toISOString(), account.id);
+        const revokedAt = new Date().toISOString();
+        db.prepare("UPDATE accounts SET revoked_at = ? WHERE id = ?").run(revokedAt, account.id);
         revokeAccount(account.id, "owner_revoked", ip, "owner");
+        db.prepare(`INSERT INTO moderation_events(id, kind, actor, subject_account_id, reason, status, created_at)
+          VALUES (?, 'account_ban', 'owner', ?, 'Owner revoked account access', 'resolved', ?)`)
+          .run(randomUUID(), account.id, revokedAt);
       }
       audit(db, "owner", "account.revoked", account.id, {}, ip);
       sendJson(res, 200, { ok: true });
@@ -1840,7 +2718,7 @@ export async function createApp(options = {}) {
         : randomUUID();
       const existingAccount = db.prepare("SELECT * FROM accounts WHERE id = ?").get(accountId);
       if (existingAccount && existingAccount.revoked_at) throw new HttpError(400, "Revoked accounts cannot receive replacement invitations.");
-      let rankId = typeof body.rank === "string" && body.rank ? body.rank : (existingAccount?.rank ?? "basic-plus");
+      let rankId = typeof body.rank === "string" && body.rank ? body.rank : (existingAccount?.rank ?? "basic");
       let rank = db.prepare("SELECT * FROM ranks WHERE id = ?").get(rankId);
       if (!rank && existingAccount && !body.rank) {
         rank = { permissions_json: existingAccount.permissions_json, features_json: existingAccount.features_json };
@@ -2116,6 +2994,7 @@ export async function createApp(options = {}) {
         }
       }
       sendJson(res, 200, {
+        email: { configured: emailConfigured, provider: emailConfigured ? "Resend" : null },
         downloads: { available: false, reason: "A web app cannot observe or manage host-browser downloads. This requires a signed desktop application." },
         desktopControl: { available: false, reason: "No desktop companion is installed or paired. Remote input and screen sharing are intentionally unavailable here." },
         ai: {
@@ -2264,7 +3143,7 @@ export async function createApp(options = {}) {
         "font-src 'self' data:",
         "style-src 'self' 'unsafe-inline'",
         "script-src 'self'",
-        `connect-src 'self'${isAdmin ? " http://127.0.0.1:4175" : ""}`,
+        "connect-src 'self'",
         "upgrade-insecure-requests",
       ].join("; "));
     }
@@ -2300,15 +3179,36 @@ export async function createApp(options = {}) {
     const url = new URL(req.url, "http://nightjar.local");
     try {
       if (handleDashboardCors(req, res, url)) return;
-      if (url.pathname.startsWith("/api/")) {
+      if (await routeDesktopCompanion(req, res, url)) {
+        return;
+      } else if (url.pathname.startsWith("/api/")) {
         await routeApi(req, res, url);
+      } else if (url.pathname === "/admin/desktop-viewer") {
+        if (req.method !== "GET") throw new HttpError(405, "Method not allowed.");
+        const owner = requireOwner(requestSession(req));
+        const ticket = url.searchParams.get("ticket") ?? "";
+        if (!/^[A-Za-z0-9_-]{43}$/.test(ticket)) {
+          throw new HttpError(404, "This one-time desktop tab is invalid or has already been used.", "desktop_viewer_unavailable");
+        }
+        const ticketHash = hash(ticket);
+        const launch = desktopViewerTickets.get(ticketHash);
+        if (!launch || launch.expiresAt <= Date.now() || launch.ownerSessionId !== owner.id) {
+          throw new HttpError(404, "This one-time desktop tab is invalid or has already been used.", "desktop_viewer_unavailable");
+        }
+        desktopViewerTickets.delete(ticketHash);
+        const data = await readFile(resolve(PUBLIC_ROOT, "desktop-viewer.html"));
+        securityHeaders(res, true, true);
+        res.setHeader("Content-Type", "text/html; charset=utf-8");
+        res.setHeader("Cache-Control", "no-store");
+        res.statusCode = 200;
+        res.end(data);
       } else {
         if (!["GET", "HEAD"].includes(req.method)) throw new HttpError(405, "Method not allowed.");
         const pathname = url.pathname === "/" ? "/index.html" : (url.pathname === "/admin" ? "/admin.html" : url.pathname);
         const filePath = resolve(PUBLIC_ROOT, `.${decodeURIComponent(pathname)}`);
         if (filePath !== PUBLIC_ROOT && !filePath.startsWith(PUBLIC_ROOT + sep)) throw new HttpError(404, "Not found.", "not_found");
         const data = await readFile(filePath);
-        securityHeaders(res, extname(filePath) === ".html", pathname === "/admin" || pathname === "/admin.html");
+        securityHeaders(res, extname(filePath) === ".html", pathname === "/admin" || pathname === "/admin.html" || pathname === "/admin/desktop-viewer");
         res.setHeader("Content-Type", MIME_TYPES[extname(filePath)] ?? "application/octet-stream");
         res.setHeader("Cache-Control", extname(filePath) === ".html" ? "no-store" : "public, max-age=3600");
         res.statusCode = 200;
@@ -2563,16 +3463,17 @@ quit
 Create options:
 --account-label "Guest"          Account label
 --account-id <uuid>              Add a replacement invitation to an existing account
---rank <rank-id>                 basic,basic-plus,ai,full-minus,owner or custom
+--rank <rank-id>                 basic,full,standard,with-ai,without-ai or custom
 --uses 1                         Every invitation is single-use
 --expires <date-or-timestamp>    e.g. 2026-12-31
 --permissions <comma-list>       browse,bookmarks,history,settings,assistant,games,support
 --features <comma-list|none>     bookmarks,history,settings,assistant,games,support
  
 Each invitation can be redeemed once. The signed-in browser uses an HttpOnly cookie session;
-use \`token renew\` to issue a replacement. Basic and Basic+ include 20 lifetime local AI
-requests per token; AI, Full- and Owner include unlimited local AI. Only Owner rank
-grants owner-console access. Enabled features must also appear in permissions.
+use \`token renew\` to issue a replacement. Basic includes 20 lifetime local AI requests per
+token; With AI and Full include unlimited local AI. Legacy rank IDs remain accepted for
+existing accounts and tokens. Owner-console access remains a separate special authorization.
+Enabled features must also appear in permissions.
 A token is shown only once.
 Revoking a token also terminates the session created by that token.`);
 }

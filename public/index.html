@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="color-scheme" content="dark light">
     <meta name="theme-color" content="#101111">
-    <title>Nightjar — private browsing space</title>
+    <title>Luma — private browsing space</title>
     <link rel="icon" href="/mark.svg" type="image/svg+xml">
     <link rel="stylesheet" href="/styles.css">
     <script src="/app.js" type="module"></script>
@@ -15,9 +15,9 @@
     <main id="app" class="app-shell" aria-live="off">
       <section id="signin" class="signin-view" hidden>
         <div class="signin-card">
-          <a class="brand brand-large" href="/" aria-label="Nightjar home">
+          <a class="brand brand-large" href="/" aria-label="Luma home">
             <span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 32 32"><path d="M23.9 5.1c-6.7-2.4-14.3.6-17.3 6.9-2.5 5.1-.6 11.1 4.2 14.1 3.8 2.4 9.1 1.3 10.8-2.7 1-2.2.2-4.8-1.8-5.8-1.8-1-4.1-.3-4.8 1.4-.5 1.2.1 2.5 1.2 2.9-2.9.7-5.8-1.4-6-4.5-.3-4 3-7.7 7.3-8.1 3.1-.3 5.7.8 7.6 2.6-.2-2.6-.6-4.9-1.2-6.8Z"/></svg></span>
-            <span>nightjar<span class="brand-dot">.</span></span>
+            <span>luma<span class="brand-dot">.</span></span>
           </a>
           <p class="eyebrow">YOUR PRIVATE BROWSING SPACE</p>
           <h1>Welcome back.</h1>
@@ -31,21 +31,39 @@
             <button class="primary-button full-button" type="submit"><span>Enter workspace</span><span aria-hidden="true">↗</span></button>
             <p id="signin-error" class="form-error" role="alert" hidden></p>
           </form>
-          <div class="signin-foot"><span class="status-dot"></span> One-person invitation <span class="sep-dot">·</span> No public sign-up</div>
+          <form id="email-login-form" class="stack-form" hidden>
+            <label for="login-email">Email</label><input id="login-email" name="email" type="email" maxlength="254" autocomplete="email" required>
+            <label for="login-password">Password</label><input id="login-password" name="password" type="password" minlength="12" maxlength="128" autocomplete="current-password" required>
+            <button class="primary-button full-button" type="submit"><span>Sign in</span><span aria-hidden="true">↗</span></button>
+            <p class="form-error" id="email-login-error" role="alert" hidden></p>
+          </form>
+          <form id="basic-signup-form" class="stack-form" hidden>
+            <label for="signup-label">Display name</label><input id="signup-label" name="label" minlength="2" maxlength="40" autocomplete="name" required>
+            <label for="signup-email">Email</label><input id="signup-email" name="email" type="email" maxlength="254" autocomplete="email" required>
+            <label for="signup-password">Password (12+ characters)</label><input id="signup-password" name="password" type="password" minlength="12" maxlength="128" autocomplete="new-password" required>
+            <button class="primary-button full-button" type="submit"><span>Create free Basic account</span><span aria-hidden="true">↗</span></button>
+            <p class="form-error" id="basic-signup-error" role="alert" hidden></p>
+          </form>
+          <div class="signin-options">
+            <button class="text-button" type="button" data-auth-view="email-login">Email sign in</button>
+            <button class="text-button" type="button" data-auth-view="signup">Create free Basic account</button>
+            <button class="text-button" type="button" data-auth-view="token">Use invitation token</button>
+          </div>
+          <div class="signin-foot"><span class="status-dot"></span> Basic is free <span class="sep-dot">·</span> Higher ranks use private invitations</div>
         </div>
       </section>
 
       <section id="browser" class="browser" hidden>
         <header class="top-frame">
           <div class="window-row">
-            <a class="brand" href="#" id="brand-home" aria-label="Go to Nightjar start page">
+            <a class="brand" href="#" id="brand-home" aria-label="Go to Luma start page">
               <span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 32 32"><path d="M23.9 5.1c-6.7-2.4-14.3.6-17.3 6.9-2.5 5.1-.6 11.1 4.2 14.1 3.8 2.4 9.1 1.3 10.8-2.7 1-2.2.2-4.8-1.8-5.8-1.8-1-4.1-.3-4.8 1.4-.5 1.2.1 2.5 1.2 2.9-2.9.7-5.8-1.4-6-4.5-.3-4 3-7.7 7.3-8.1 3.1-.3 5.7.8 7.6 2.6-.2-2.6-.6-4.9-1.2-6.8Z"/></svg></span>
-              <span>nightjar<span class="brand-dot">.</span></span>
+              <span>luma<span class="brand-dot">.</span></span>
             </a>
             <div class="tab-strip" id="tab-strip" role="tablist" aria-label="Browser tabs"></div>
             <button id="new-tab" class="new-tab icon-button" aria-label="New tab" title="New tab (Ctrl+T)"></button>
             <div class="window-actions">
-              <button id="account-chip" class="account-chip" type="button" title="Account and session"><span class="avatar">N</span><span id="account-label">Guest</span><span class="presence"></span></button>
+              <button id="account-chip" class="account-chip" type="button" title="Account and session"><span class="avatar">L</span><span id="account-label">Guest</span><span class="presence"></span></button>
               <button id="signout" class="icon-button window-icon" aria-label="Sign out" title="Sign out"></button>
             </div>
           </div>
@@ -91,6 +109,16 @@
                 <kbd>↵</kbd>
               </form>
               <div class="quick-links" id="quick-links"></div>
+              <section class="project-areas-card" aria-label="Luma tools">
+                <div class="project-areas-heading"><div><span class="project-area-eyebrow">YOUR SPACE</span><h2>Luma tools</h2></div></div>
+                <div class="luma-tool-grid">
+                  <button class="secondary-button" id="notes-open" type="button">Notes</button>
+                  <button class="secondary-button" id="storage-open" type="button">Cloud storage</button>
+                  <button class="secondary-button" id="chat-open" type="button">Chat</button>
+                  <button class="secondary-button" id="rank-store-open" type="button">Rank store</button>
+                  <a class="secondary-button" href="/bugs">Report a bug</a>
+                </div>
+              </section>
               <section class="project-areas-card" id="project-areas-card" aria-labelledby="project-areas-title">
                 <div class="project-areas-heading"><div><span class="project-area-eyebrow">PRIVATE WORKSPACES</span><h2 id="project-areas-title">Project areas</h2></div><button id="project-area-create" class="secondary-button" type="button">＋ Add area</button></div>
                 <div id="project-area-list" class="project-area-list"><p class="muted">Loading your private areas…</p></div>
@@ -105,7 +133,7 @@
               <p>Check that the local Rammerhead service is running, then retry. The address is still available to open in a regular tab.</p>
               <div class="fallback-actions"><button id="open-external" class="secondary-button" type="button">Open in a regular tab</button><button id="retry-page" class="primary-button" type="button">Try again</button></div>
             </div>
-            <iframe id="page-frame" title="Nightjar Rammerhead browsing engine" referrerpolicy="no-referrer" allow="camera 'none'; microphone 'none'; geolocation 'none'; display-capture 'none'; clipboard-read 'none'; clipboard-write 'none'"></iframe>
+            <iframe id="page-frame" title="Luma web browsing engine" referrerpolicy="no-referrer" allow="camera 'none'; microphone 'none'; geolocation 'none'; display-capture 'none'; clipboard-read 'none'; clipboard-write 'none'"></iframe>
           </div>
           <div id="workspace-toast" class="workspace-toast" role="status" aria-live="polite"></div>
         </section>

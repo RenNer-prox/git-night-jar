@@ -1,6 +1,6 @@
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
-const state = { csrf: "", summary: null, siteControls: null, tokens: [], accounts: [], ranks: [], friends: [], sessions: [], audits: [], feedback: [], twoFactor: false, toastTimer: 0 };
+const state = { csrf: "", summary: null, siteControls: null, tokens: [], accounts: [], ranks: [], friends: [], sessions: [], audits: [], feedback: [], moderation: [], twoFactor: false, toastTimer: 0, desktopViewerWindow: null, desktopViewerHandshake: null };
 
 function esc(value = "") {
   return String(value).replace(/[&<>"']/g, (char) => ({
@@ -62,7 +62,7 @@ async function api(path, options = {}) {
   try {
     response = await fetch(path, { method, headers, credentials: "same-origin", cache: "no-store", body: options.body === undefined ? undefined : JSON.stringify(options.body) });
   } catch {
-    throw new Error("Cannot reach Nightjar. Check the local service connection.");
+    throw new Error("Cannot reach Luma. Check the service connection.");
   }
   const data = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(data.error ?? "The request could not be completed.");
@@ -125,8 +125,8 @@ function renderMetrics() {
     ["Session enforcement", "One live session per account · 12-hour idle and maximum age", "Active", false],
     ["Admin isolation", "Separate owner session cookie and protected endpoints", "Active", false],
     ["Browser boundary", "Rammerhead on a separate origin; public HTTP(S) destinations and ports 80/443 only", "Scoped", false],
-    ["Local AI assistant", `${state.summary.localAi.model} · auto-start ${state.summary.localAi.autoStart ? "enabled" : "disabled"} · ${state.summary.localAi.serviceStatus}`, state.summary.localAi.startedByApp ? "Started by Nightjar" : "Loopback only", !state.summary.localAi.autoStart],
-    ["Desktop companion", state.desktopSession ? "Locally paired · no shell-command API" : "Manual start · loopback only · local approval", state.desktopSharing ? "Active" : "Not sharing", !state.desktopSession],
+    ["Local AI assistant", `${state.summary.localAi.model} · auto-start ${state.summary.localAi.autoStart ? "enabled" : "disabled"} · ${state.summary.localAi.serviceStatus}`, state.summary.localAi.startedByApp ? "Started by Luma" : "Loopback only", !state.summary.localAi.autoStart],
+    ["Desktop companion", state.desktopSession ? "Owner-paired · no shell-command API" : "Outbound HTTPS relay · local approval", state.desktopSharing ? "Active" : "Not sharing", !state.desktopSession],
   ].map(([title, desc, status, warn]) => `<div class="security-item"><span class="security-icon${warn ? " warning" : ""}">${warn ? "!" : "✓"}</span><div class="security-copy"><strong>${esc(title)} · ${esc(status)}</strong><span>${esc(desc)}</span></div></div>`).join("");
   $("#usage-stats").innerHTML = [
     ["Page visits", state.summary.usage.visits],
@@ -159,7 +159,7 @@ function renderRanks() {
     root.innerHTML = '<div class="table-empty">No access ranks are configured. Add a rank before creating an invitation.</div>';
     return;
   }
-  root.innerHTML = `<div class="rank-grid">${state.ranks.map((rank) => `<article class="rank-card"><div class="rank-heading"><strong>${esc(rank.label)}</strong>${["basic", "basic-plus", "ai", "full-minus", "owner"].includes(rank.id) ? '<span class="status-badge active">built in</span>' : `<button class="danger-button" type="button" data-delete-rank="${esc(rank.id)}" aria-label="Remove ${esc(rank.label)} rank">Remove</button>`}</div><div class="rank-id mono">${esc(rank.id)}</div><div class="token-permissions">${rank.features.includes("assistant") ? `<span>${["basic", "basic-plus"].includes(rank.id) ? "AI · 20 requests per token" : "Unlimited AI"}</span>` : "<span>AI disabled</span>"}${rank.permissions.map((item) => `<span>${esc(item)}</span>`).join("")}</div><div class="table-secondary">Features: ${esc(rank.features.join(", ") || "none")}</div></article>`).join("")}</div>`;
+  root.innerHTML = `<div class="rank-grid">${state.ranks.map((rank) => `<article class="rank-card"><div class="rank-heading"><strong>${esc(rank.label)}</strong>${["basic", "basic-plus", "ai", "full-minus", "owner", "standard", "with-ai", "without-ai", "full"].includes(rank.id) ? '<span class="status-badge active">built in</span>' : `<button class="danger-button" type="button" data-delete-rank="${esc(rank.id)}" aria-label="Remove ${esc(rank.label)} rank">Remove</button>`}</div><div class="rank-id mono">${esc(rank.id)}</div><div class="token-permissions">${rank.features.includes("assistant") ? `<span>${["basic", "basic-plus"].includes(rank.id) ? "AI · 20 requests per token" : "Unlimited AI"}</span>` : "<span>AI disabled</span>"}${rank.permissions.map((item) => `<span>${esc(item)}</span>`).join("")}</div><div class="table-secondary">Features: ${esc(rank.features.join(", ") || "none")}</div></article>`).join("")}</div>`;
   $$("[data-delete-rank]").forEach((button) => button.addEventListener("click", () => void deleteRank(button.dataset.deleteRank)));
 }
 
@@ -177,8 +177,8 @@ function renderAccounts() {
 function editAccount(id) {
   const account = state.accounts.find((item) => item.id === id);
   if (!account || account.revokedAt) return;
-  const permissions = ["bookmarks", "history", "settings", "assistant", "games", "support"];
-  const features = ["bookmarks", "history", "settings", "assistant", "games", "support"];
+  const permissions = ["bookmarks", "history", "settings", "assistant", "games", "support", "notes", "storage", "chat", "bugs"];
+  const features = ["bookmarks", "history", "settings", "assistant", "games", "support", "notes", "storage", "chat", "bugs"];
   const savedRank = state.ranks.some((rank) => rank.id === account.rank)
     ? ""
     : `<option value="${esc(account.rank)}" selected>Saved permissions (${esc(account.rank)})</option>`;
@@ -277,11 +277,36 @@ function renderFeedback() {
     root.innerHTML = '<div class="table-empty">No support requests or suggestions yet.</div>';
     return;
   }
-  root.innerHTML = `<div class="feedback-list">${state.feedback.map((item) => `<article class="feedback-card"><header><div><span class="status-badge ${item.kind === "suggestion" ? "active" : "used"}">${item.kind === "suggestion" ? "Suggestion" : "Support"}</span><h3>${esc(item.subject)}</h3><p>${esc(item.accountLabel)} · ${esc(date(item.createdAt))}</p></div><label class="feedback-status">Status<select data-feedback-status="${esc(item.id)}" aria-label="Update status for ${esc(item.subject)}"><option value="open" ${item.status === "open" ? "selected" : ""}>Open</option><option value="in_progress" ${item.status === "in_progress" ? "selected" : ""}>In progress</option><option value="resolved" ${item.status === "resolved" ? "selected" : ""}>Resolved</option></select></label></header><p class="feedback-message">${esc(item.message)}</p></article>`).join("")}</div>`;
+  root.innerHTML = `<div class="feedback-list">${state.feedback.map((item) => `<article class="feedback-card"><header><div><span class="status-badge ${item.kind === "suggestion" ? "active" : "used"}">${item.kind === "suggestion" ? "Suggestion" : item.kind === "bug" ? "Bug report" : "Support"}</span><h3>${esc(item.subject)}</h3><p>${esc(item.accountLabel)} · ${esc(date(item.createdAt))}</p></div><label class="feedback-status">Status<select data-feedback-status="${esc(item.id)}" aria-label="Update status for ${esc(item.subject)}"><option value="open" ${item.status === "open" ? "selected" : ""}>Open</option><option value="in_progress" ${item.status === "in_progress" ? "selected" : ""}>In progress</option><option value="resolved" ${item.status === "resolved" ? "selected" : ""}>Resolved</option></select></label></header><p class="feedback-message">${esc(item.message)}</p></article>`).join("")}</div>`;
   $$("[data-feedback-status]").forEach((select) => select.addEventListener("change", async () => {
     try {
       await api(`/api/admin/feedback/${select.dataset.feedbackStatus}`, { method: "PATCH", body: { status: select.value } });
       toast("Feedback status updated.");
+    } catch (error) { toast(error.message); }
+  }));
+}
+
+function renderModeration() {
+  const root = $("#moderation-table");
+  if (!state.moderation.length) {
+    root.innerHTML = '<div class="table-empty">No reports or bans have been recorded.</div>';
+    return;
+  }
+  root.innerHTML = `<div class="feedback-list">${state.moderation.map((item) => `<article class="feedback-card"><header><div><span class="status-badge ${item.kind === "account_ban" ? "revoked" : "used"}">${esc(item.kind.replaceAll("_", " "))}</span><h3>${esc(item.subjectLabel)}</h3><p>${item.reporterLabel ? `Reported by ${esc(item.reporterLabel)} · ` : ""}${esc(date(item.createdAt))}</p></div><label class="feedback-status">Status<select data-moderation-status="${esc(item.id)}"><option value="open" ${item.status === "open" ? "selected" : ""}>Open</option><option value="resolved" ${item.status === "resolved" ? "selected" : ""}>Resolved</option><option value="dismissed" ${item.status === "dismissed" ? "selected" : ""}>Dismissed</option></select></label></header><p class="feedback-message">${esc(item.reason)}</p>${item.kind !== "account_ban" && item.subjectAccountId ? `<div class="table-actions"><button class="danger-button" type="button" data-ban-account="${esc(item.id)}">Ban account</button></div>` : ""}</article>`).join("")}</div>`;
+  $$("[data-moderation-status]").forEach((select) => select.addEventListener("change", async () => {
+    try {
+      await api(`/api/admin/moderation/${select.dataset.moderationStatus}`, { method: "PATCH", body: { status: select.value } });
+      await loadModeration();
+      toast("Moderation entry updated.");
+    } catch (error) { toast(error.message); }
+  }));
+  $$("[data-ban-account]").forEach((button) => button.addEventListener("click", async () => {
+    const item = state.moderation.find((entry) => entry.id === button.dataset.banAccount);
+    if (!item || !confirm(`Ban ${item.subjectLabel} and end their active sessions?`)) return;
+    try {
+      await api(`/api/admin/moderation/${item.id}`, { method: "PATCH", body: { status: "resolved", ban: true } });
+      await Promise.all([loadModeration(), loadTokens(), loadSessions()]);
+      toast("Account banned and its sessions revoked.");
     } catch (error) { toast(error.message); }
   }));
 }
@@ -344,36 +369,39 @@ async function saveSiteControls() {
   } catch (error) { toast(error.message); }
 }
 
-function localCompanionUrl(path) {
-  if (location.protocol !== "http:" || !["localhost", "127.0.0.1"].includes(location.hostname)) {
-    throw new Error("The companion works only from Nightjar opened on this same PC at localhost or 127.0.0.1.");
-  }
-  return `http://127.0.0.1:4175${path}`;
-}
+const desktopRelayPaths = {
+  "/pair": "/api/admin/desktop/relay/pair",
+  "/status": "/api/admin/desktop/relay/status",
+  "/heartbeat": "/api/admin/desktop/relay/heartbeat",
+  "/start": "/api/admin/desktop/relay/start",
+  "/enable-input": "/api/admin/desktop/relay/enable-input",
+  "/stop": "/api/admin/desktop/relay/stop",
+  "/input": "/api/admin/desktop/relay/input",
+  "/frame": "/api/admin/desktop/relay/frame",
+};
 
-async function companionRequest(path, { body, token = state.desktopSession } = {}) {
+async function companionRequest(path, { body } = {}) {
   const headers = { Accept: "application/json" };
   if (body !== undefined) headers["Content-Type"] = "application/json";
-  if (token) headers.Authorization = `Bearer ${token}`;
+  if (body !== undefined && state.csrf) headers["X-NJ-CSRF"] = state.csrf;
   let response;
   try {
-    response = await fetch(localCompanionUrl(path), {
+    response = await fetch(desktopRelayPaths[path], {
       method: body === undefined ? "GET" : "POST",
-      mode: "cors",
-      credentials: "omit",
+      credentials: "same-origin",
       cache: "no-store",
       headers,
       body: body === undefined ? undefined : JSON.stringify(body),
     });
   } catch {
-    throw new Error("Cannot reach the local companion. Start it in a separate terminal with `npm run companion`.");
+    throw new Error("Cannot reach Luma. Check the server connection and Linux companion.");
   }
   if ((response.headers.get("content-type") ?? "").startsWith("image/")) {
-    if (!response.ok) throw new Error("The local companion could not capture the screen.");
+    if (!response.ok) throw new Error("Luma could not get a screen frame from the companion.");
     return response.blob();
   }
   const data = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(data.error ?? "The local companion request was rejected.");
+  if (!response.ok) throw new Error(data.error ?? "The desktop relay request was rejected.");
   return data;
 }
 
@@ -388,6 +416,7 @@ function renderDesktopState() {
   $("#desktop-status").className = `status-badge ${sharing ? "active" : paired ? "used" : "revoked"}`;
   $("#desktop-start").disabled = !paired || sharing;
   $("#desktop-enable-input").disabled = !sharing || state.desktopInputEnabled;
+  $("#desktop-open-tab").disabled = !sharing;
   $("#desktop-stop").disabled = !paired;
   $("#desktop-view").hidden = !sharing;
   $("#desktop-send-key").disabled = !state.desktopInputEnabled;
@@ -414,10 +443,9 @@ function watchDesktopOwnerSession() {
 
 async function pairDesktop() {
   try {
-    setDesktopMessage("Authorizing this owner session and pairing with the local companion…");
-    const { ticket } = await api("/api/admin/desktop/ticket", { method: "POST", body: {} });
-    const result = await companionRequest("/pair", { token: "", body: { ticket } });
-    state.desktopSession = result.sessionToken;
+    setDesktopMessage("Pairing this owner session with the connected Linux companion…");
+    await companionRequest("/pair", { body: {} });
+    state.desktopSession = "paired";
     state.desktopSharing = false;
     state.desktopInputEnabled = false;
     watchDesktopOwnerSession();
@@ -429,10 +457,22 @@ async function pairDesktop() {
   }
 }
 
+async function waitForDesktopState(key, value) {
+  const deadline = Date.now() + 60_000;
+  while (Date.now() < deadline) {
+    const status = await companionRequest("/status");
+    if (!status.companionOnline) throw new Error("The Linux companion disconnected from Luma.");
+    if (status[key] === value) return status;
+    await new Promise((resolve) => setTimeout(resolve, 750));
+  }
+  throw new Error("Local approval timed out. Check the Linux companion terminal and try again.");
+}
+
 async function startDesktopSharing() {
   try {
     setDesktopMessage("Waiting for local screen-sharing approval in the companion terminal…");
     await companionRequest("/start", { body: {} });
+    await waitForDesktopState("sharing", true);
     state.desktopSharing = true;
     state.desktopInputEnabled = false;
     setDesktopMessage("Screen sharing is active. Remote input remains off until separately approved.");
@@ -450,10 +490,64 @@ async function enableDesktopInput() {
   try {
     setDesktopMessage("Waiting for separate local mouse-and-keyboard approval in the companion terminal…");
     await companionRequest("/enable-input", { body: {} });
+    await waitForDesktopState("inputEnabled", true);
     state.desktopInputEnabled = true;
     setDesktopMessage("Remote mouse and keyboard are active. Stop sharing to end the session.");
     renderDesktopState();
   } catch (error) {
+    setDesktopMessage(error.message);
+    toast(error.message);
+  }
+}
+
+async function openDesktopViewer() {
+  if (!state.desktopSession || !state.desktopSharing) return;
+  if (state.desktopViewerWindow && !state.desktopViewerWindow.closed) {
+    state.desktopViewerWindow.focus();
+    return;
+  }
+
+  const viewer = window.open("about:blank", "_blank");
+  if (!viewer) {
+    setDesktopMessage("Allow pop-ups for Luma to open the one-time desktop tab.");
+    return;
+  }
+  const launchId = crypto.randomUUID();
+  let handshakeState;
+  const clearHandshake = () => {
+    window.removeEventListener("message", handshake);
+    clearTimeout(handshakeState?.timer);
+    if (state.desktopViewerHandshake === handshakeState) state.desktopViewerHandshake = null;
+  };
+  const handshake = (event) => {
+    if (event.origin !== location.origin || event.source !== viewer ||
+        event.data?.type !== "nightjar-desktop-viewer-ready" || event.data?.launchId !== launchId ||
+        !state.desktopSession || !state.desktopSharing) return;
+    viewer.postMessage({ type: "nightjar-desktop-session", launchId }, location.origin);
+    clearHandshake();
+  };
+  window.addEventListener("message", handshake);
+  state.desktopViewerWindow = viewer;
+  handshakeState = { timer: 0, clear: clearHandshake };
+  state.desktopViewerHandshake = handshakeState;
+  handshakeState.timer = setTimeout(() => {
+    clearHandshake();
+    if (state.desktopViewerWindow === viewer) {
+      state.desktopViewerWindow = null;
+      if (!viewer.closed) viewer.close();
+      setDesktopMessage("The one-time desktop tab could not be authorized. Open it again from this owner panel.");
+    }
+  }, 30_000);
+
+  try {
+    setDesktopMessage("Creating a one-time tab for this authenticated owner session…");
+    const { url } = await api("/api/admin/desktop/viewer-ticket", { method: "POST", body: {} });
+    viewer.location.replace(`${url}#${encodeURIComponent(launchId)}`);
+    setDesktopMessage("The one-time desktop tab is opening. The tab must keep this owner session and cannot be reopened from its URL.");
+  } catch (error) {
+    clearHandshake();
+    state.desktopViewerWindow = null;
+    if (!viewer.closed) viewer.close();
     setDesktopMessage(error.message);
     toast(error.message);
   }
@@ -471,6 +565,10 @@ async function refreshDesktopFrame() {
     state.desktopFrameUrl = nextUrl;
     if (oldUrl) URL.revokeObjectURL(oldUrl);
   } catch (error) {
+    if (error.message.includes("Waiting for the Linux desktop companion to send a screen frame")) {
+      setDesktopMessage(error.message);
+      return;
+    }
     setDesktopMessage(error.message);
     await stopDesktop(true);
   } finally {
@@ -510,6 +608,11 @@ async function stopDesktop(silent = false) {
   clearInterval(state.desktopHeartbeatTimer);
   state.desktopFrameTimer = 0;
   state.desktopHeartbeatTimer = 0;
+  if (state.desktopViewerHandshake) {
+    state.desktopViewerHandshake.clear();
+  }
+  if (state.desktopViewerWindow && !state.desktopViewerWindow.closed) state.desktopViewerWindow.close();
+  state.desktopViewerWindow = null;
   if (state.desktopSession) {
     try { await companionRequest("/stop", { body: {} }); } catch (error) {
       if (!silent) toast(error.message);
@@ -537,6 +640,12 @@ async function loadFeedback() {
   renderFeedback();
 }
 
+async function loadModeration() {
+  const result = await api("/api/admin/moderation");
+  state.moderation = result.items;
+  renderModeration();
+}
+
 function setPanel(name) {
   $$("[data-panel-content]").forEach((panel) => { panel.hidden = panel.dataset.panelContent !== name; });
   $$(".rail-item[data-panel]").forEach((button) => button.classList.toggle("selected", button.dataset.panel === name));
@@ -546,12 +655,13 @@ function setPanel(name) {
   if (name === "site-controls") void loadSiteControls().catch((error) => toast(error.message));
   if (name === "sessions") void loadSessions().catch((error) => toast(error.message));
   if (name === "support") void loadFeedback().catch((error) => toast(error.message));
+  if (name === "moderation") void loadModeration().catch((error) => toast(error.message));
   if (name === "audit") void api("/api/admin/audit?limit=100").then((result) => { state.audits = result.items; renderAudit(); }).catch((error) => toast(error.message));
 }
 
 function createRankDialog() {
-  const permissions = ["bookmarks", "history", "settings", "assistant", "games", "support"];
-  const features = ["bookmarks", "history", "settings", "assistant", "games", "support"];
+  const permissions = ["bookmarks", "history", "settings", "assistant", "games", "support", "notes", "storage", "chat", "bugs"];
+  const features = ["bookmarks", "history", "settings", "assistant", "games", "support", "notes", "storage", "chat", "bugs"];
   openDialog({
     title: "Create access rank",
     description: "Ranks are reusable permission presets for new invitations.",
@@ -588,7 +698,7 @@ async function deleteRank(id) {
 }
 
 function inviteForm() {
-  const defaultRank = state.ranks.find((rank) => rank.id === "basic-plus") ?? state.ranks[0];
+  const defaultRank = state.ranks.find((rank) => rank.id === "basic") ?? state.ranks[0];
   const accountOptions = state.accounts.filter((account) => !account.revokedAt).map((account) => `<option value="${esc(account.id)}">${esc(account.label)} · ${esc(account.id.slice(0, 8))}</option>`).join("");
   const rankOptions = `<option value="">Use saved account permissions</option>${state.ranks.map((rank) => `<option value="${esc(rank.id)}" ${rank.id === defaultRank?.id ? "selected" : ""}>${esc(rank.label)} · ${rank.features.includes("assistant") ? "AI enabled" : "No AI"}</option>`).join("")}`;
   return `<form id="invite-form" class="admin-invite-form">
@@ -605,7 +715,11 @@ function inviteForm() {
       <label class="check-option"><input type="checkbox" name="permission" value="settings" checked> Settings</label>
       <label class="check-option"><input type="checkbox" name="permission" value="assistant" checked> Local AI assistant</label>
       <label class="check-option"><input type="checkbox" name="permission" value="games" checked> Math games</label>
-      <label class="check-option"><input type="checkbox" name="permission" value="support" checked> Support and suggestions</label>
+      <label class="check-option"><input type="checkbox" name="permission" value="support" checked> Support</label>
+      <label class="check-option"><input type="checkbox" name="permission" value="notes" checked> Notes</label>
+      <label class="check-option"><input type="checkbox" name="permission" value="storage" checked> Cloud storage</label>
+      <label class="check-option"><input type="checkbox" name="permission" value="chat" checked> Private chat</label>
+      <label class="check-option"><input type="checkbox" name="permission" value="bugs" checked> Bug reports</label>
     </div></div>
     <div class="form-field wide-field"><span class="subsection-label">Account features</span><div class="check-grid">
       <label class="check-option"><input type="checkbox" name="feature" value="bookmarks" checked> Bookmarks</label>
@@ -613,11 +727,15 @@ function inviteForm() {
       <label class="check-option"><input type="checkbox" name="feature" value="settings" checked> Settings</label>
       <label class="check-option"><input type="checkbox" name="feature" value="assistant" checked> Local AI assistant</label>
       <label class="check-option"><input type="checkbox" name="feature" value="games" checked> Math games</label>
-      <label class="check-option"><input type="checkbox" name="feature" value="support" checked> Support and suggestions</label>
+      <label class="check-option"><input type="checkbox" name="feature" value="support" checked> Support</label>
+      <label class="check-option"><input type="checkbox" name="feature" value="notes" checked> Notes</label>
+      <label class="check-option"><input type="checkbox" name="feature" value="storage" checked> Cloud storage</label>
+      <label class="check-option"><input type="checkbox" name="feature" value="chat" checked> Private chat</label>
+      <label class="check-option"><input type="checkbox" name="feature" value="bugs" checked> Bug reports</label>
     </div></div>
     <div class="form-field"><span class="field-label">Theme</span><select class="field-select" name="theme"><option value="dark">Dark</option><option value="light">Light</option><option value="system">Follow system</option></select></div>
-    <div class="form-field"><span class="field-label">Accent</span><input class="field-input" name="accent" type="color" value="#ff7048"></div>
-    <div class="form-field"><span class="field-label">Homepage</span><select class="field-select" name="homepageType"><option value="home">Nightjar start page</option><option value="blank">Blank page</option><option value="custom">Custom address</option></select></div>
+    <div class="form-field"><span class="field-label">Accent</span><input class="field-input" name="accent" type="color" value="#75cfff"></div>
+    <div class="form-field"><span class="field-label">Homepage</span><select class="field-select" name="homepageType"><option value="home">Luma start page</option><option value="blank">Blank page</option><option value="custom">Custom address</option></select></div>
     <label class="form-field wide-field custom-home-field" hidden><span class="field-label">Custom homepage address</span><input class="field-input" name="homepage" type="url" placeholder="https://example.com"></label>
     <div class="form-field"><span class="field-label">Search provider</span><select class="field-select" name="searchProvider"><option value="duckduckgo">DuckDuckGo</option><option value="brave">Brave Search</option><option value="bing">Bing</option><option value="google">Google</option><option value="yandex">Yandex</option></select></div>
     <div class="form-field"><span class="field-label">Interface density</span><select class="field-select" name="density"><option value="compact">Compact</option><option value="comfortable">Comfortable</option><option value="spacious">Spacious</option></select></div>
@@ -647,7 +765,7 @@ function createInviteDialog(friendMode = false) {
   accountSelect.addEventListener("change", () => {
     const account = state.accounts.find((item) => item.id === accountSelect.value);
     const settings = account?.settings ?? {
-      theme: "dark", accent: "#ff7048", density: "comfortable", homepage: "home",
+      theme: "dark", accent: "#75cfff", density: "comfortable", homepage: "home",
       searchProvider: "duckduckgo", customCursor: true,
       privacy: { suppressReferrer: true, clearOnExit: false },
     };
@@ -779,6 +897,16 @@ async function bootstrap() {
     state.twoFactor = result.twoFactorEnabled;
     showConsole();
     await Promise.all([loadOverview(), loadTokens(), loadSessions(), loadSiteControls()]);
+    const desktop = await companionRequest("/status");
+    state.desktopSession = desktop.paired ? "paired" : "";
+    state.desktopSharing = desktop.sharing;
+    state.desktopInputEnabled = desktop.inputEnabled;
+    renderDesktopState();
+    if (desktop.paired) watchDesktopOwnerSession();
+    if (desktop.sharing) {
+      void refreshDesktopFrame();
+      state.desktopFrameTimer = setInterval(() => void refreshDesktopFrame(), 750);
+    }
     setInterval(async () => {
       try {
         const refreshed = await api("/api/admin/me");
@@ -825,11 +953,13 @@ $("#refresh-accounts").addEventListener("click", () => void loadTokens().catch((
 $("#refresh-friends").addEventListener("click", () => void loadFriends().catch((error) => toast(error.message)));
 $("#refresh-sessions").addEventListener("click", () => void loadSessions().catch((error) => toast(error.message)));
 $("#refresh-feedback").addEventListener("click", () => void loadFeedback().catch((error) => toast(error.message)));
+$("#refresh-moderation").addEventListener("click", () => void loadModeration().catch((error) => toast(error.message)));
 $("#refresh-audit").addEventListener("click", () => void api("/api/admin/audit?limit=100").then((result) => { state.audits = result.items; renderAudit(); }).catch((error) => toast(error.message)));
 $("#save-site-controls").addEventListener("click", () => void saveSiteControls());
 $("#desktop-pair").addEventListener("click", () => void pairDesktop());
 $("#desktop-start").addEventListener("click", () => void startDesktopSharing());
 $("#desktop-enable-input").addEventListener("click", () => void enableDesktopInput());
+$("#desktop-open-tab").addEventListener("click", () => void openDesktopViewer());
 $("#desktop-stop").addEventListener("click", () => void stopDesktop());
 $("#desktop-frame").addEventListener("pointerdown", clickDesktopFrame);
 $("#desktop-send-key").addEventListener("click", () => void sendDesktopInput({ action: "key", key: $("#desktop-key").value }));

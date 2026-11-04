@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark light">
+    <title>Nightjar Desktop Viewer</title>
+    <link rel="icon" href="/mark.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="/styles.css">
+    <link rel="stylesheet" href="/admin.css">
+    <script src="/desktop-viewer.js" type="module"></script>
+  </head>
+  <body>
+    <main class="desktop-viewer-shell">
+      <header class="desktop-viewer-header">
+        <div>
+          <p class="eyebrow">PRIVATE OWNER VIEW</p>
+          <h1>Linux desktop</h1>
+        </div>
+        <button id="desktop-viewer-close" class="secondary-button" type="button">Close tab</button>
+      </header>
+      <p id="desktop-viewer-message" class="desktop-message" role="status" aria-live="polite">Waiting for authorization from the owner panel…</p>
+      <section id="desktop-viewer-screen" class="desktop-view" hidden>
+        <img id="desktop-viewer-frame" alt="Live screen from the locally approved Linux companion">
+        <div class="desktop-input-controls">
+          <label class="desktop-key-field">
+            <span class="field-label">Navigation key</span>
+            <select id="desktop-viewer-key" class="field-select">
+              <option value="escape">Escape</option><option value="tab">Tab</option><option value="enter">Enter</option>
+              <option value="backspace">Backspace</option><option value="up">Up</option><option value="down">Down</option>
+              <option value="left">Left</option><option value="right">Right</option>
+            </select>
+          </label>
+          <button id="desktop-viewer-send-key" class="secondary-button" type="button" disabled>Send key</button>
+          <label class="desktop-type-field">
+            <span class="field-label">Type text (up to 120 characters)</span>
+            <input id="desktop-viewer-text" class="field-input" type="text" maxlength="120" autocomplete="off">
+          </label>
+          <button id="desktop-viewer-send-text" class="secondary-button" type="button" disabled>Type text</button>
+          <p class="table-secondary">Click the screen to send a pointer click. System shortcuts are restricted. Stop sharing in the owner panel to end access.</p>
+        </div>
+      </section>
+    </main>
+  </body>
+</html>

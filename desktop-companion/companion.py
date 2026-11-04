@@ -13,6 +13,9 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlparse
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -34,7 +37,15 @@ KEYS = {
     "down": 108,
     "page-down": 109,
 }
-MAX_SCREEN_BYTES = 20 * 1024 * 1024
+MAX_SCREEN_BYTES = 8 * 1024 * 1024
+
+
+class RejectRedirects(HTTPRedirectHandler):
+    def redirect_request(self, _request, _response, _code, _message, _headers, _new_url):
+        return None
+
+
+relay_opener = build_opener(RejectRedirects)
 
 
 def load_project_env():
@@ -64,6 +75,21 @@ APP_ORIGINS = {
 configured_origin = os.environ.get("APP_ORIGIN", "")
 if configured_origin in APP_ORIGINS:
     APP_ORIGINS.add(configured_origin)
+REMOTE_ORIGIN = ""
+if configured_origin:
+    parsed_origin = urlparse(configured_origin)
+    if (
+        parsed_origin.scheme == "https"
+        and parsed_origin.netloc
+        and parsed_origin.username is None
+        and parsed_origin.password is None
+        and not parsed_origin.path
+        and not parsed_origin.query
+        and not parsed_origin.fragment
+    ):
+        REMOTE_ORIGIN = configured_origin
+    elif configured_origin not in APP_ORIGINS:
+        raise SystemExit("Remote desktop relay requires APP_ORIGIN to be an HTTPS origin without a path.")
 
 for executable in ("grim", "ydotool"):
     if not shutil.which(executable):
@@ -113,6 +139,9 @@ def approve_locally(prompt):
         return False
     with console_lock:
         try:
+            if not select.select([sys.stdin], [], [], 45)[0]:
+                print("\nLocal approval timed out.", flush=True)
+                return False
             answer = input(f"\n{prompt} Type YES in this terminal to approve: ")
         except EOFError:
             return False
@@ -143,6 +172,143 @@ def run_tool(arguments, timeout=3):
         raise RuntimeError(f"Local desktop operation failed: {error.__class__.__name__}.") from error
 
 
+def perform_input(body):
+    action = body.get("action")
+    if not isinstance(action, str):
+        raise ValueError("Choose a supported pointer, key, or text action.")
+    if action in {"move", "click"}:
+        x = body.get("x")
+        y = body.get("y")
+        if type(x) is not int or type(y) is not int or not (0 <= x <= 16384 and 0 <= y <= 16384):
+            raise ValueError("Pointer coordinates are outside the allowed range.")
+        buttons = {"left": ("0xC0",), "right": ("0x41", "0x81"), "middle": ("0x42", "0x82")}
+        button = body.get("button", "left")
+        if action == "click" and (not isinstance(button, str) or button not in buttons):
+            raise ValueError("Choose left, right, or middle click.")
+        run_tool(["ydotool", "mousemove", "--absolute", str(x), str(y)])
+        if action == "click":
+            run_tool(["ydotool", "click", *buttons[button]])
+        return
+    if action == "key":
+        key = body.get("key")
+        if not isinstance(key, str) or key not in KEYS:
+            raise ValueError("That key is not available for remote input.")
+        code = str(KEYS[key])
+        run_tool(["ydotool", "key", f"{code}:1", f"{code}:0"])
+        return
+    if action == "type":
+        text = body.get("text")
+        if not isinstance(text, str) or not 1 <= len(text) <= 120 or any(not character.isprintable() for character in text):
+            raise ValueError("Text must contain 1–120 printable characters.")
+        run_tool(["ydotool", "type", "--", text])
+        return
+    raise ValueError("Choose a supported pointer, key, or text action.")
+
+
+def relay_request(method, path, body=b""):
+    timestamp = str(int(time.time() * 1000))
+    nonce = secrets.token_urlsafe(24)
+    digest = hashlib.sha256(body).hexdigest()
+    message = f"{method}\n{path}\n{timestamp}\n{nonce}\n{digest}".encode()
+    signature = hmac.new(bytes.fromhex(SECRET), message, hashlib.sha256).hexdigest()
+    headers = {
+        "Accept": "application/json",
+        "Cache-Control": "no-store",
+        "X-NJ-Desktop-Timestamp": timestamp,
+        "X-NJ-Desktop-Nonce": nonce,
+        "X-NJ-Desktop-Signature": signature,
+    }
+    if body:
+        headers["Content-Type"] = "image/png" if path.endswith("/frame") else "application/json"
+    request = Request(f"{REMOTE_ORIGIN}{path}", data=body or None, headers=headers, method=method)
+    try:
+        with relay_opener.open(request, timeout=8) as response:
+            return response.status, response.read()
+    except HTTPError as error:
+        try:
+            return error.code, error.read(2048)
+        finally:
+            error.close()
+
+
+def remote_agent():
+    global session
+    print(f"Nightjar Linux companion (outbound HTTPS relay to {REMOTE_ORIGIN})", flush=True)
+    print("The companion makes no public listener. Screen sharing and remote input still require separate local terminal approval.", flush=True)
+    last_frame = 0.0
+    last_poll_success = time.monotonic()
+    while True:
+        try:
+            status, response = relay_request("GET", "/api/desktop/companion/poll")
+            if status != 200:
+                raise RuntimeError(f"Nightjar relay returned HTTP {status}.")
+            payload = json.loads(response)
+            last_poll_success = time.monotonic()
+            if not payload.get("paired") or not payload.get("sharing"):
+                stop_session()
+            command = payload.get("command")
+            if command:
+                action = command.get("action")
+                accepted = True
+                detail = ""
+                try:
+                    if action == "start":
+                        accepted = approve_locally("Nightjar owner console requested live screen sharing.")
+                        with state_lock:
+                            session = {
+                                "sharing": accepted,
+                                "input": False,
+                                "lastSeen": time.time(),
+                                "expiresAt": time.time() + 4 * 60 * 60,
+                            } if accepted else None
+                    elif action == "enable-input":
+                        accepted = approve_locally("Nightjar owner console requested remote mouse and keyboard input.")
+                        with state_lock:
+                            if session and session["sharing"]:
+                                session["input"] = accepted
+                            else:
+                                accepted = False
+                    elif action == "stop":
+                        stop_session()
+                    elif action == "input":
+                        with state_lock:
+                            if not session or not session["sharing"] or not session["input"]:
+                                raise RuntimeError("Local approval for remote input is not active.")
+                            perform_input(command.get("input", {}))
+                    else:
+                        accepted = False
+                        detail = "Unsupported relay action."
+                except (ValueError, RuntimeError) as error:
+                    accepted = False
+                    detail = str(error)
+                if action != "stop":
+                    result = json.dumps({
+                        "action": action,
+                        "commandId": command.get("id"),
+                        "sessionId": command.get("sessionId"),
+                        "ok": accepted,
+                        "error": detail,
+                    }, separators=(",", ":")).encode()
+                    result_status, _ = relay_request("POST", "/api/desktop/companion/result", result)
+                    if result_status != 200:
+                        raise RuntimeError(f"Nightjar relay rejected companion result (HTTP {result_status}).")
+            with state_lock:
+                sharing = bool(session and session["sharing"])
+            now = time.monotonic()
+            if sharing and now - last_frame >= 1.0:
+                image = capture_screen()
+                frame_status, _ = relay_request("POST", "/api/desktop/companion/frame", image)
+                if frame_status != 204:
+                    raise RuntimeError(f"Nightjar relay rejected screen frame (HTTP {frame_status}).")
+                last_frame = now
+            time.sleep(0.25)
+        except (OSError, RuntimeError, URLError, ValueError, json.JSONDecodeError) as error:
+            if time.monotonic() - last_poll_success > 10:
+                stop_session()
+            print(f"Nightjar desktop relay connection failed: {error}", file=sys.stderr, flush=True)
+            time.sleep(2)
+
+
 def capture_screen(timeout=4):
     try:
         process = subprocess.Popen(
@@ -167,7 +333,7 @@ def capture_screen(timeout=4):
                 break
             size += len(chunk)
             if size > MAX_SCREEN_BYTES:
-                raise RuntimeError("Screen capture exceeded the 20 MB limit.")
+                raise RuntimeError("Screen capture exceeded the 8 MB relay limit.")
             chunks.append(chunk)
         if process.wait(timeout=max(0, deadline - time.monotonic())) != 0:
             raise RuntimeError("Screen capture failed.")
@@ -421,36 +587,7 @@ class CompanionHandler(BaseHTTPRequestHandler):
         self.send_error(404)
 
     def perform_input(self, body):
-        action = body.get("action")
-        if not isinstance(action, str):
-            raise ValueError("Choose a supported pointer, key, or text action.")
-        if action in {"move", "click"}:
-            x = body.get("x")
-            y = body.get("y")
-            if type(x) is not int or type(y) is not int or not (0 <= x <= 16384 and 0 <= y <= 16384):
-                raise ValueError("Pointer coordinates are outside the allowed range.")
-            buttons = {"left": ("0xC0",), "right": ("0x41", "0x81"), "middle": ("0x42", "0x82")}
-            button = body.get("button", "left")
-            if action == "click" and (not isinstance(button, str) or button not in buttons):
-                raise ValueError("Choose left, right, or middle click.")
-            run_tool(["ydotool", "mousemove", "--absolute", str(x), str(y)])
-            if action == "click":
-                run_tool(["ydotool", "click", *buttons[button]])
-            return
-        if action == "key":
-            key = body.get("key")
-            if not isinstance(key, str) or key not in KEYS:
-                raise ValueError("That key is not available for remote input.")
-            code = str(KEYS[key])
-            run_tool(["ydotool", "key", f"{code}:1", f"{code}:0"])
-            return
-        if action == "type":
-            text = body.get("text")
-            if not isinstance(text, str) or not 1 <= len(text) <= 120 or any(not character.isprintable() for character in text):
-                raise ValueError("Text must contain 1–120 printable characters.")
-            run_tool(["ydotool", "type", "--", text])
-            return
-        raise ValueError("Choose a supported pointer, key, or text action.")
+        perform_input(body)
 
 
 class LoopbackServer(ThreadingHTTPServer):
@@ -469,6 +606,9 @@ def expire_idle_sessions(server):
 
 
 def main():
+    if REMOTE_ORIGIN and REMOTE_ORIGIN not in APP_ORIGINS:
+        remote_agent()
+        return
     print("Nightjar Linux companion (manual start; loopback only)")
     print(f"Open the owner console at {', '.join(sorted(APP_ORIGINS))}")
     print("Pairing is authorized by the signed ticket from your authenticated Nightjar owner session; no pairing code is used.")

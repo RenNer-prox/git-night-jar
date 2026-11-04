@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createHmac } from "node:crypto";
+import { createHash, createHmac, randomBytes } from "node:crypto";
 import { createApp, isPublicAddress, restrictedLookup, runAdminCommand } from "../server.js";
 
 const password = "a-strong-owner-password-for-tests";
@@ -50,6 +50,33 @@ async function request(path, { method = "GET", cookie, csrf, body, origin } = {}
     ? await response.json()
     : await response.text();
   return { response, data };
+}
+
+function desktopSignature(path, method, body = Buffer.alloc(0)) {
+  const timestamp = String(Date.now());
+  const nonce = randomBytes(24).toString("base64url");
+  const digest = createHash("sha256").update(body).digest("hex");
+  const message = `${method}\n${path}\n${timestamp}\n${nonce}\n${digest}`;
+  const signature = createHmac("sha256", Buffer.from("a".repeat(64), "hex")).update(message).digest("hex");
+  return {
+    "X-NJ-Desktop-Timestamp": timestamp,
+    "X-NJ-Desktop-Nonce": nonce,
+    "X-NJ-Desktop-Signature": signature,
+  };
+}
+
+async function signedDesktopRequest(path, { method = "GET", body = Buffer.alloc(0), headers = {} } = {}) {
+  const signedHeaders = desktopSignature(path, method, body);
+  const response = await fetch(`${baseUrl}${path}`, {
+    method,
+    headers: {
+      ...signedHeaders,
+      ...headers,
+      ...(body.length ? { "Content-Type": path.endsWith("/frame") ? "image/png" : "application/json" } : {}),
+    },
+    body: body.length ? body : undefined,
+  });
+  return response;
 }
 
 function cookieFrom(response, name) {
@@ -136,10 +163,11 @@ test("serves the browser and keeps administrator routes isolated", async () => {
   assert.equal(adminPage.status, 200);
   const adminCsp = adminPage.headers.get("content-security-policy");
   assert.match(adminCsp, /img-src 'self' data: https: blob:/);
-  assert.match(adminCsp, /connect-src 'self' http:\/\/127\.0\.0\.1:4175/);
+  assert.match(adminCsp, /connect-src 'self'/);
   const adminHtml = await adminPage.text();
   assert.match(adminHtml, /Administrator sign-in/);
   assert.match(adminHtml, /Pair this owner session/);
+  assert.match(adminHtml, /Open one-time desktop tab/);
   assert.match(adminHtml, /data-panel="friends"/);
   assert.match(adminHtml, /Add friend/);
   assert.match(adminHtml, /HttpOnly session cookie and CSRF protection/);
@@ -167,6 +195,183 @@ test("serves the browser and keeps administrator routes isolated", async () => {
   assert.equal(forbiddenProxyAsset.status, 403);
   const forbidden = await request("/api/admin/summary");
   assert.equal(forbidden.response.status, 401);
+});
+
+test("desktop viewer launches once and requires the issuing owner session", async () => {
+  const anonymousTicket = await request("/api/admin/desktop/viewer-ticket", { method: "POST", body: {} });
+  assert.equal(anonymousTicket.response.status, 401);
+
+  const invited = await issueToken({ label: "Desktop viewer non-owner" });
+  const userLogin = await request("/api/auth/login", { method: "POST", body: { token: invited.token } });
+  const userCookie = cookieFrom(userLogin.response, "nj_session");
+  const nonOwnerTicket = await request("/api/admin/desktop/viewer-ticket", {
+    method: "POST", cookie: userCookie, csrf: userLogin.data.csrf, body: {},
+  });
+  assert.equal(nonOwnerTicket.response.status, 403);
+
+  const missingCsrf = await request("/api/admin/desktop/viewer-ticket", {
+    method: "POST", cookie: adminCookie, body: {},
+  });
+  assert.equal(missingCsrf.response.status, 403);
+
+  const issued = await request("/api/admin/desktop/viewer-ticket", {
+    method: "POST", cookie: adminCookie, csrf: adminCsrf, body: {},
+  });
+  assert.equal(issued.response.status, 200, JSON.stringify(issued.data));
+  assert.equal(issued.data.expiresInSeconds, 60);
+  assert.match(issued.data.url, /^\/admin\/desktop-viewer\?ticket=[A-Za-z0-9_-]{43}$/);
+
+  const anonymousOpen = await request(issued.data.url);
+  assert.equal(anonymousOpen.response.status, 401);
+  const nonOwnerOpen = await request(issued.data.url, { cookie: userCookie });
+  assert.equal(nonOwnerOpen.response.status, 403);
+  const secondOwner = await request("/api/admin/login", { method: "POST", body: { password } });
+  const otherOwnerOpen = await request(issued.data.url, { cookie: cookieFrom(secondOwner.response, "nj_admin") });
+  assert.equal(otherOwnerOpen.response.status, 404);
+  const viewer = await request(issued.data.url, { cookie: adminCookie });
+  assert.equal(viewer.response.status, 200);
+  assert.equal(viewer.response.headers.get("cache-control"), "no-store");
+  assert.match(viewer.response.headers.get("content-security-policy"), /connect-src 'self'/);
+  assert.match(viewer.data, /Waiting for authorization from the owner panel/);
+  assert.doesNotMatch(viewer.data, /admin-password/);
+
+  const replay = await request(issued.data.url, { cookie: adminCookie });
+  assert.equal(replay.response.status, 404);
+  const guessedPath = await request("/admin/desktop-viewer", { cookie: adminCookie });
+  assert.equal(guessedPath.response.status, 404);
+});
+
+test("desktop relay requires signed companion traffic and owner-authorized controls", async () => {
+  const anonymousStatus = await request("/api/admin/desktop/relay/status");
+  assert.equal(anonymousStatus.response.status, 401);
+
+  const unsignedPoll = await request("/api/desktop/companion/poll");
+  assert.equal(unsignedPoll.response.status, 401);
+  const idlePoll = await signedDesktopRequest("/api/desktop/companion/poll");
+  assert.equal(idlePoll.status, 200);
+  assert.equal((await idlePoll.json()).command, null);
+  const replayHeaders = desktopSignature("/api/desktop/companion/poll", "GET");
+  const replayFirst = await fetch(`${baseUrl}/api/desktop/companion/poll`, { headers: replayHeaders });
+  assert.equal(replayFirst.status, 200);
+  const replaySecond = await fetch(`${baseUrl}/api/desktop/companion/poll`, { headers: replayHeaders });
+  assert.equal(replaySecond.status, 401);
+
+  const missingCsrf = await request("/api/admin/desktop/relay/pair", {
+    method: "POST", cookie: adminCookie, body: {},
+  });
+  assert.equal(missingCsrf.response.status, 403);
+  const paired = await request("/api/admin/desktop/relay/pair", {
+    method: "POST", cookie: adminCookie, csrf: adminCsrf, body: {},
+  });
+  assert.equal(paired.response.status, 200, JSON.stringify(paired.data));
+
+  const noShare = await request("/api/admin/desktop/relay/start", {
+    method: "POST", cookie: adminCookie, csrf: adminCsrf, body: {},
+  });
+  assert.equal(noShare.response.status, 202);
+  const startCommandResponse = await signedDesktopRequest("/api/desktop/companion/poll");
+  const startCommand = (await startCommandResponse.json()).command;
+  assert.equal(startCommand.action, "start");
+  const startResult = await signedDesktopRequest("/api/desktop/companion/result", {
+    method: "POST",
+    body: Buffer.from(JSON.stringify({
+      commandId: startCommand.id, sessionId: startCommand.sessionId, action: "start", ok: true,
+    })),
+  });
+  assert.equal(startResult.status, 200);
+
+  const state = await request("/api/admin/desktop/relay/status", { cookie: adminCookie });
+  assert.equal(state.data.sharing, true);
+  const png = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
+  const frameUpload = await signedDesktopRequest("/api/desktop/companion/frame", { method: "POST", body: png });
+  assert.equal(frameUpload.status, 204);
+  const nonOwnerInvite = await issueToken({ label: "Desktop relay non-owner" });
+  const nonOwnerLogin = await request("/api/auth/login", {
+    method: "POST", body: { token: nonOwnerInvite.token },
+  });
+  assert.equal(nonOwnerLogin.response.status, 200);
+  const nonOwnerCookie = cookieFrom(nonOwnerLogin.response, "nj_session");
+  assert.equal((await request("/api/admin/desktop/relay/status", { cookie: nonOwnerCookie })).response.status, 403);
+  assert.equal((await fetch(`${baseUrl}/api/admin/desktop/relay/frame`, {
+    headers: { Cookie: nonOwnerCookie },
+  })).status, 403);
+  for (const [path, body] of [
+    ["/api/admin/desktop/relay/start", {}],
+    ["/api/admin/desktop/relay/input", { action: "key", key: "enter" }],
+    ["/api/admin/desktop/relay/stop", {}],
+  ]) {
+    const denied = await request(path, {
+      method: "POST", cookie: nonOwnerCookie, csrf: nonOwnerLogin.data.csrf, body,
+    });
+    assert.equal(denied.response.status, 403, `${path} should require an owner session`);
+  }
+  const frame = await fetch(`${baseUrl}/api/admin/desktop/relay/frame`, { headers: { Cookie: adminCookie } });
+  assert.equal(frame.status, 200);
+  assert.deepEqual(Buffer.from(await frame.arrayBuffer()), png);
+
+  const enabled = await request("/api/admin/desktop/relay/enable-input", {
+    method: "POST", cookie: adminCookie, csrf: adminCsrf, body: {},
+  });
+  assert.equal(enabled.response.status, 202);
+  const enableCommand = (await (await signedDesktopRequest("/api/desktop/companion/poll")).json()).command;
+  assert.equal(enableCommand.action, "enable-input");
+  const enableResult = await signedDesktopRequest("/api/desktop/companion/result", {
+    method: "POST",
+    body: Buffer.from(JSON.stringify({
+      commandId: enableCommand.id, sessionId: enableCommand.sessionId, action: "enable-input", ok: true,
+    })),
+  });
+  assert.equal(enableResult.status, 200);
+
+  const invalidInput = await request("/api/admin/desktop/relay/input", {
+    method: "POST", cookie: adminCookie, csrf: adminCsrf,
+    body: { action: "shell", command: "id" },
+  });
+  assert.equal(invalidInput.response.status, 400);
+  const acceptedInput = await request("/api/admin/desktop/relay/input", {
+    method: "POST", cookie: adminCookie, csrf: adminCsrf, body: { action: "key", key: "enter" },
+  });
+  assert.equal(acceptedInput.response.status, 202);
+  const inputCommand = (await (await signedDesktopRequest("/api/desktop/companion/poll")).json()).command;
+  assert.equal(inputCommand.action, "input");
+  assert.deepEqual(inputCommand.input, { action: "key", key: "enter" });
+  const inputResult = await signedDesktopRequest("/api/desktop/companion/result", {
+    method: "POST",
+    body: Buffer.from(JSON.stringify({
+      commandId: inputCommand.id, sessionId: inputCommand.sessionId, action: "input", ok: true,
+    })),
+  });
+  assert.equal(inputResult.status, 200);
+
+  const stop = await request("/api/admin/desktop/relay/stop", {
+    method: "POST", cookie: adminCookie, csrf: adminCsrf, body: {},
+  });
+  assert.equal(stop.response.status, 200);
+  const stopCommand = (await (await signedDesktopRequest("/api/desktop/companion/poll")).json()).command;
+  assert.equal(stopCommand.action, "stop");
+  const afterStop = await request("/api/admin/desktop/relay/status", { cookie: adminCookie });
+  assert.equal(afterStop.data.paired, false);
+
+  const relayOwnerInvite = await issueToken({ label: "Desktop relay owner", rank: "owner" });
+  const relayOwnerLogin = await request("/api/auth/login", {
+    method: "POST", body: { token: relayOwnerInvite.token },
+  });
+  assert.equal(relayOwnerLogin.response.status, 200);
+  const relayOwnerCookie = cookieFrom(relayOwnerLogin.response, "nj_session");
+  const pairedAgain = await request("/api/admin/desktop/relay/pair", {
+    method: "POST", cookie: relayOwnerCookie, csrf: relayOwnerLogin.data.csrf, body: {},
+  });
+  assert.equal(pairedAgain.response.status, 200);
+  const loggedOut = await request("/api/auth/logout", {
+    method: "POST", cookie: relayOwnerCookie, csrf: relayOwnerLogin.data.csrf, body: {},
+  });
+  assert.equal(loggedOut.response.status, 200);
+  await new Promise((resolve) => setTimeout(resolve, 1100));
+  const afterOwnerLogout = await signedDesktopRequest("/api/desktop/companion/poll");
+  assert.equal(afterOwnerLogout.status, 200, await afterOwnerLogout.clone().text());
+  const disconnected = await afterOwnerLogout.json();
+  assert.equal(disconnected.paired, false);
+  assert.equal(disconnected.command.action, "stop");
 });
 
 test("allows multiple independent owner sessions", async () => {
@@ -419,35 +624,49 @@ test("owner CLI creates one-time invitations and revokes their active session", 
   assert.equal(listed.items.find((item) => item.id === created.id).status, "revoked");
 });
 
-test("provides the five built-in ranks and protects built-in presets", async () => {
+test("provides the five requested Luma ranks and preserves token-rank access", async () => {
   const ranks = await runAdminCommand(["ranks"], { databasePath: join(tempDirectory, "nightjar.sqlite") });
   const byId = new Map(ranks.items.map((rank) => [rank.id, rank]));
-  assert.deepEqual(["basic", "basic-plus", "ai", "full-minus", "owner"].map((id) => byId.get(id)?.label), ["Basic", "Basic+", "AI", "Full-", "Owner"]);
-  assert.deepEqual(byId.get("basic").features, ["assistant"]);
-  assert.deepEqual(byId.get("basic-plus").features, ["bookmarks", "history", "assistant"]);
-  assert.deepEqual(byId.get("ai").features, ["bookmarks", "history", "assistant"]);
-  assert.ok(!byId.get("ai").features.includes("settings"));
-  assert.ok(byId.get("full-minus").features.includes("settings"));
-  assert.deepEqual(byId.get("owner").features, byId.get("full-minus").features);
+  const requestedRankIds = ["basic", "full", "standard", "with-ai", "without-ai"];
+  assert.deepEqual(ranks.items.filter((rank) => requestedRankIds.includes(rank.id)).map((rank) => rank.id).sort(), [...requestedRankIds].sort());
+  assert.deepEqual(requestedRankIds.map((id) => byId.get(id)?.label), ["Basic", "Full", "Standard", "With AI", "Without AI"]);
+  assert.ok(!["basic-plus", "ai", "full-minus", "owner"].some((id) => byId.has(id)), "legacy built-ins should not appear in rank listings");
+  assert.ok(byId.get("basic").features.includes("assistant"));
+  assert.ok(byId.get("basic").features.includes("notes"));
   const basicToken = await runAdminCommand(["token", "make", "Basic invite", "basic"], {
     databasePath: join(tempDirectory, "nightjar.sqlite"),
   });
-  assert.deepEqual(basicToken.features, ["assistant"]);
+  assert.deepEqual(basicToken.features, byId.get("basic").features);
   const basicPlusToken = await runAdminCommand(["token", "make", "Basic plus invite", "basic-plus"], {
     databasePath: join(tempDirectory, "nightjar.sqlite"),
   });
-  assert.deepEqual(basicPlusToken.features, ["bookmarks", "history", "assistant"]);
+  assert.ok(basicPlusToken.features.includes("bookmarks"));
+  assert.ok(basicPlusToken.features.includes("assistant"));
   const aiToken = await runAdminCommand(["token", "make", "AI invite", "ai"], {
     databasePath: join(tempDirectory, "nightjar.sqlite"),
   });
   assert.equal(aiToken.rank, "ai");
+  assert.ok(aiToken.features.includes("bookmarks"));
+  assert.ok(!aiToken.features.includes("settings"));
+  const fullTierToken = await runAdminCommand(["token", "make", "Full tier invite", "full"], {
+    databasePath: join(tempDirectory, "nightjar.sqlite"),
+  });
+  assert.equal(fullTierToken.rank, "full");
+  const fullTierLogin = await request("/api/auth/login", { method: "POST", body: { token: fullTierToken.token } });
+  assert.equal(fullTierLogin.response.status, 200);
+  const fullTierCookie = cookieFrom(fullTierLogin.response, "nj_session");
+  assert.equal((await request("/api/session", { cookie: fullTierCookie })).data.account.rank, "full");
+  assert.notEqual((await request("/api/admin/summary", { cookie: fullTierCookie })).response.status, 200);
   const fullToken = await runAdminCommand(["token", "make", "Full invite", "full-minus"], {
     databasePath: join(tempDirectory, "nightjar.sqlite"),
   });
+  assert.ok(fullToken.features.includes("settings"));
+
   const renewal = await runAdminCommand(["token", "renew", fullToken.accountId, "Replacement", "owner"], {
     databasePath: join(tempDirectory, "nightjar.sqlite"),
   });
   assert.equal(renewal.rank, "owner");
+  assert.ok(renewal.features.includes("settings"));
   assert.equal(renewal.usageLimit, 1);
   await assert.rejects(runAdminCommand(["ranks", "delete", "owner"], {
     databasePath: join(tempDirectory, "nightjar.sqlite"),
@@ -473,10 +692,125 @@ test("provides the five built-in ranks and protects built-in presets", async () 
   assert.equal((await runAdminCommand(["accounts"], { databasePath: join(tempDirectory, "nightjar.sqlite") })).type, "accounts");
 });
 
+test("Basic signup is free and supports account email login", { timeout: 15_000 }, async () => {
+  const store = await request("/api/rank-store");
+  assert.equal(store.response.status, 200);
+  assert.equal(store.data.checkoutConfigured, false);
+  assert.deepEqual(store.data.items.map((rank) => [rank.id, rank.label]), [
+    ["basic", "Basic"],
+    ["standard", "Standard"],
+    ["without-ai", "Without AI"],
+    ["with-ai", "With AI"],
+    ["full", "Full"],
+  ]);
+  assert.equal(store.data.items[0].price, 0);
+  assert.equal(store.data.items[0].available, true);
+
+  const email = `free-${Date.now()}@example.test`;
+  const signup = await request("/api/auth/basic-signup", {
+    method: "POST",
+    body: { label: "Free account", email, password: "basic-account-password" },
+  });
+  assert.equal(signup.response.status, 201, JSON.stringify(signup.data));
+  assert.equal(signup.data.account.rank, "basic");
+  assert.ok(signup.data.account.features.includes("notes"));
+  assert.ok(signup.data.account.features.includes("storage"));
+  const cookie = cookieFrom(signup.response, "nj_session");
+  assert.equal((await request("/api/notes", { cookie })).response.status, 200);
+  assert.equal((await request("/api/auth/logout", { method: "POST", cookie, csrf: signup.data.csrf, body: {} })).response.status, 200);
+  const login = await request("/api/auth/email-login", {
+    method: "POST",
+    body: { email, password: "basic-account-password" },
+  });
+  assert.equal(login.response.status, 200, JSON.stringify(login.data));
+  assert.equal(login.data.account.rank, "basic");
+});
+
+test("notes, SQLite files, and bug reports are account-scoped", async () => {
+  const permissions = ["browse", "notes", "storage", "bugs"];
+  const features = ["notes", "storage", "bugs"];
+  const ownerInvite = await issueToken({ label: "Luma owner-data test", rank: "basic", permissions, features });
+  const otherInvite = await issueToken({ label: "Luma isolated-data test", rank: "basic", permissions, features });
+  const ownerLogin = await request("/api/auth/login", { method: "POST", body: { token: ownerInvite.token } });
+  const otherLogin = await request("/api/auth/login", { method: "POST", body: { token: otherInvite.token } });
+  const ownerCookie = cookieFrom(ownerLogin.response, "nj_session");
+  const otherCookie = cookieFrom(otherLogin.response, "nj_session");
+
+  const note = await request("/api/notes", {
+    method: "POST", cookie: ownerCookie, csrf: ownerLogin.data.csrf,
+    body: { title: "Private note", content: "Account-owned text." },
+  });
+  assert.equal(note.response.status, 201);
+  assert.deepEqual((await request("/api/notes", { cookie: otherCookie })).data.items, []);
+  assert.equal((await request(`/api/notes/${note.data.item.id}`, { cookie: otherCookie })).response.status, 404);
+
+  const file = await request("/api/storage", {
+    method: "POST", cookie: ownerCookie, csrf: ownerLogin.data.csrf,
+    body: { name: "private.txt", type: "text/plain", content: Buffer.from("private file").toString("base64") },
+  });
+  assert.equal(file.response.status, 201);
+  assert.deepEqual((await request("/api/storage", { cookie: otherCookie })).data.items, []);
+  assert.equal((await request(`/api/storage/${file.data.item.id}/download`, { cookie: otherCookie })).response.status, 404);
+
+  const report = await request("/api/feedback", {
+    method: "POST", cookie: ownerCookie, csrf: ownerLogin.data.csrf,
+    body: { kind: "bug", subject: "A private bug report", message: "The settings dialog did not save." },
+  });
+  assert.equal(report.response.status, 201);
+  assert.equal((await request("/api/admin/feedback")).response.status, 401);
+  const feedback = await request("/api/admin/feedback?limit=200", { cookie: adminCookie });
+  assert.ok(feedback.data.items.some((item) => item.id === report.data.id && item.kind === "bug"));
+  const restrictedInvite = await issueToken({ label: "No bug permission", rank: "basic", permissions: ["browse"], features: [] });
+  const restrictedLogin = await request("/api/auth/login", { method: "POST", body: { token: restrictedInvite.token } });
+  const deniedReport = await request("/api/feedback", {
+    method: "POST", cookie: cookieFrom(restrictedLogin.response, "nj_session"), csrf: restrictedLogin.data.csrf,
+    body: { kind: "bug", subject: "Not permitted", message: "This account cannot submit bugs." },
+  });
+  assert.equal(deniedReport.response.status, 403);
+});
+
+test("friend chat supports blocking and private owner reports", async () => {
+  const permissions = ["browse", "chat"];
+  const features = ["chat"];
+  const senderInvite = await issueToken({ label: "Chat sender", rank: "basic", friend: true, permissions, features });
+  const recipientInvite = await issueToken({ label: "Chat recipient", rank: "basic", friend: true, permissions, features });
+  const senderLogin = await request("/api/auth/login", { method: "POST", body: { token: senderInvite.token } });
+  const recipientLogin = await request("/api/auth/login", { method: "POST", body: { token: recipientInvite.token } });
+  const senderCookie = cookieFrom(senderLogin.response, "nj_session");
+  const recipientCookie = cookieFrom(recipientLogin.response, "nj_session");
+  const message = await request("/api/chat/messages", {
+    method: "POST", cookie: senderCookie, csrf: senderLogin.data.csrf,
+    body: { peer: recipientInvite.item.accountId, message: "Private hello." },
+  });
+  assert.equal(message.response.status, 201);
+  const report = await request("/api/chat/report", {
+    method: "POST", cookie: recipientCookie, csrf: recipientLogin.data.csrf,
+    body: { messageId: message.data.item.id, reason: "Please review this message." },
+  });
+  assert.equal(report.response.status, 201);
+  assert.equal((await request("/api/admin/moderation")).response.status, 401);
+  const moderation = await request("/api/admin/moderation", { cookie: adminCookie });
+  assert.ok(moderation.data.items.some((item) => item.id === report.data.id && item.kind === "chat_report"));
+  const blocked = await request(`/api/chat/blocks/${senderInvite.item.accountId}`, {
+    method: "POST", cookie: recipientCookie, csrf: recipientLogin.data.csrf, body: {},
+  });
+  assert.equal(blocked.response.status, 200);
+  assert.equal((await request(`/api/chat/messages?peer=${recipientInvite.item.accountId}`, { cookie: senderCookie })).response.status, 403);
+  for (const accountId of [senderInvite.item.accountId, recipientInvite.item.accountId]) {
+    const removed = await request(`/api/admin/friends/${accountId}`, {
+      method: "DELETE", cookie: adminCookie, csrf: adminCsrf,
+    });
+    assert.equal(removed.response.status, 200);
+  }
+});
+
 test("owner can manage ranks and review private support requests", async () => {
   const ranks = await request("/api/admin/ranks", { cookie: adminCookie });
   assert.equal(ranks.response.status, 200);
   assert.ok(ranks.data.items.some((rank) => rank.id === "basic"));
+  assert.deepEqual(ranks.data.items.filter((rank) => ["basic", "full", "standard", "with-ai", "without-ai"].includes(rank.id)).map((rank) => rank.id).sort(),
+    ["basic", "full", "standard", "with-ai", "without-ai"]);
+  assert.ok(!ranks.data.items.some((rank) => ["basic-plus", "ai", "full-minus", "owner"].includes(rank.id)));
   const customRank = await request("/api/admin/ranks", {
     method: "POST", cookie: adminCookie, csrf: adminCsrf,
     body: { label: "Quiet reader", permissions: ["browse", "support"], features: ["support"] },

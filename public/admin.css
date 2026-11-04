@@ -88,6 +88,13 @@
 .desktop-input-controls .field-select, .desktop-input-controls .field-input { min-height: 31px; padding: 0 8px; border: 1px solid var(--border); border-radius: 7px; color: var(--text); background: var(--bg); font: inherit; }
 .desktop-input-controls .table-secondary { flex-basis: 100%; max-width: none; white-space: normal; line-height: 1.5; }
 .desktop-actions .danger-button:disabled, .desktop-actions button:disabled, .desktop-input-controls button:disabled { opacity: .45; cursor: not-allowed; }
+.desktop-viewer-shell { width: min(100%, 1500px); height: 100%; margin: 0 auto; padding: clamp(14px, 3vw, 36px); display: flex; flex-direction: column; }
+.desktop-viewer-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.desktop-viewer-header h1 { margin: 5px 0 0; font-size: 22px; font-weight: 580; }
+.desktop-viewer-shell > .desktop-message { flex: none; }
+.desktop-viewer-shell > .desktop-view { min-height: 0; flex: 1; display: flex; flex-direction: column; }
+.desktop-viewer-shell > .desktop-view img { width: 100%; max-height: calc(100vh - 190px); flex: 1; }
+.desktop-viewer-shell .desktop-input-controls { flex: none; }
 .admin-signin-card { border-color: color-mix(in srgb, var(--accent) 20%, var(--border)); }
 .admin-signin-card .brand-large { margin-bottom: 30px; }
 .admin-signin-card .stack-form { gap: 8px; }
