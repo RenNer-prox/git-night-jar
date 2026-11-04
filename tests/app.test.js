@@ -168,6 +168,7 @@ test("serves the browser and keeps administrator routes isolated", async () => {
   assert.match(adminCsp, /connect-src 'self'/);
   const adminHtml = await adminPage.text();
   assert.match(adminHtml, /Administrator sign-in/);
+  assert.match(adminHtml, /id="admin-remember"/);
   assert.match(adminHtml, /Pair this owner session/);
   assert.match(adminHtml, /Open one-time desktop tab/);
   assert.match(adminHtml, /data-panel="friends"/);
@@ -197,6 +198,28 @@ test("serves the browser and keeps administrator routes isolated", async () => {
   assert.equal(forbiddenProxyAsset.status, 403);
   const forbidden = await request("/api/admin/summary");
   assert.equal(forbidden.response.status, 401);
+});
+
+test("admin remember-me is opt-in, lasts 30 days, and remains authenticated", async () => {
+  const anonymousAccess = await request("/api/admin/me");
+  assert.equal(anonymousAccess.response.status, 401);
+
+  const shortLogin = await request("/api/admin/login", {
+    method: "POST",
+    body: { password },
+  });
+  assert.equal(shortLogin.response.status, 200);
+  assert.match(shortLogin.response.headers.get("set-cookie"), /Max-Age=43200/);
+
+  const rememberedLogin = await request("/api/admin/login", {
+    method: "POST",
+    body: { password, keepSignedIn: true },
+  });
+  assert.equal(rememberedLogin.response.status, 200, JSON.stringify(rememberedLogin.data));
+  assert.match(rememberedLogin.response.headers.get("set-cookie"), /Max-Age=2592000/);
+  const rememberedCookie = cookieFrom(rememberedLogin.response, "nj_admin");
+  const consoleAccess = await request("/api/admin/me", { cookie: rememberedCookie });
+  assert.equal(consoleAccess.response.status, 200);
 });
 
 test("guests can browse without a token but remain isolated from private account APIs", async () => {

@@ -25,6 +25,7 @@
             <input id="admin-password" type="password" autocomplete="current-password" required minlength="16">
             <label for="admin-totp">Authenticator code <span class="muted">(if enabled)</span></label>
             <input id="admin-totp" type="text" inputmode="numeric" pattern="[0-9]{6}" autocomplete="one-time-code" maxlength="6" placeholder="6-digit code">
+            <label class="checkbox-label"><input id="admin-remember" type="checkbox"> Keep me signed in for 30 days on this device</label>
             <button class="primary-button full-button" type="submit">Unlock owner console <span aria-hidden="true">↗</span></button>
             <p id="admin-login-error" class="form-error" role="alert" hidden></p>
           </form>

@@ -27,10 +27,18 @@ const ADMIN_SESSION_COOKIE = "nj_admin";
 const MAX_BODY_BYTES = 64 * 1024;
 const SESSION_MAX_AGE_MS = 12 * 60 * 60 * 1000;
 const SESSION_IDLE_MS = SESSION_MAX_AGE_MS;
+const ADMIN_REMEMBER_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
 const GUEST_SESSION_MAX_AGE_MS = 30 * 60 * 1000;
 const GUEST_SESSION_IDLE_MS = 10 * 60 * 1000;
 const GUEST_PROXY_REQUEST_LIMIT = 1200;
 const GUEST_PROXY_SOCKET_LIMIT = 24;
+
+function sessionIdleLimitMs(session) {
+  const sessionAgeMs = Date.parse(session.expires_at) - Date.parse(session.created_at);
+  return session.principal === "admin" && sessionAgeMs > SESSION_MAX_AGE_MS
+    ? ADMIN_REMEMBER_MAX_AGE_MS
+    : SESSION_IDLE_MS;
+}
 const DESKTOP_RELAY_IDLE_MS = 60_000;
 const PERMISSIONS = ["browse", "bookmarks", "history", "settings", "assistant", "games", "support", "notes", "storage", "chat", "bugs"];
 const FEATURES = ["bookmarks", "history", "settings", "assistant", "games", "support", "notes", "storage", "chat", "bugs"];
@@ -342,7 +350,7 @@ function sendJson(res, status, payload, headers = {}) {
   res.end(body);
 }
 
-function cookieHeader(value, secure, clear = false, name = SESSION_COOKIE) {
+function cookieHeader(value, secure, clear = false, name = SESSION_COOKIE, maxAgeMs = SESSION_MAX_AGE_MS) {
   const parts = [
     `${name}=${clear ? "" : encodeURIComponent(value)}`,
     "Path=/",
@@ -351,7 +359,7 @@ function cookieHeader(value, secure, clear = false, name = SESSION_COOKIE) {
   ];
   if (secure) parts.push("Secure");
   if (clear) parts.push("Max-Age=0");
-  else parts.push(`Max-Age=${Math.floor(SESSION_MAX_AGE_MS / 1000)}`);
+  else parts.push(`Max-Age=${Math.floor(maxAgeMs / 1000)}`);
   return parts.join("; ");
 }
 
@@ -1133,7 +1141,7 @@ export async function createApp(options = {}) {
     if (
       !session ||
       Date.parse(session.expires_at) <= now ||
-      now - Date.parse(session.last_seen_at) > SESSION_IDLE_MS
+      now - Date.parse(session.last_seen_at) > sessionIdleLimitMs(session)
     ) return false;
     if (session.principal === "admin") return true;
     if (session.principal !== "user") return false;
@@ -1298,7 +1306,7 @@ export async function createApp(options = {}) {
       const session = db.prepare("SELECT * FROM sessions WHERE session_hash = ?").get(hash(raw));
       if (!session) continue;
       const now = Date.now();
-      if (Date.parse(session.expires_at) <= now || now - Date.parse(session.last_seen_at) > SESSION_IDLE_MS) {
+      if (Date.parse(session.expires_at) <= now || now - Date.parse(session.last_seen_at) > sessionIdleLimitMs(session)) {
         db.prepare("DELETE FROM sessions WHERE id = ?").run(session.id);
         closeProxySession(session.id);
         continue;
@@ -1491,11 +1499,11 @@ export async function createApp(options = {}) {
     return createHmac("sha256", rawCookie).update("nightjar-csrf-v1").digest("base64url");
   }
 
-  function newSession(principal, accountId, tokenId) {
+  function newSession(principal, accountId, tokenId, maxAgeMs = SESSION_MAX_AGE_MS) {
     const raw = randomBytes(32).toString("base64url");
     const csrf = csrfForSession(raw);
     const now = new Date();
-    const expires = new Date(now.getTime() + SESSION_MAX_AGE_MS);
+    const expires = new Date(now.getTime() + maxAgeMs);
     const id = randomUUID();
     db.prepare(`INSERT INTO sessions(id, session_hash, principal, account_id, token_id, csrf_hash, created_at, last_seen_at, expires_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
@@ -2044,9 +2052,11 @@ export async function createApp(options = {}) {
         audit(db, "unknown", "admin.login_failed", "owner", {}, ip);
         throw new HttpError(401, "Administrator credentials were not accepted.", "invalid_admin_credentials");
       }
-      const session = newSession("admin", null, null);
+      const rememberSession = body.keepSignedIn === true;
+      const maxAgeMs = rememberSession ? ADMIN_REMEMBER_MAX_AGE_MS : SESSION_MAX_AGE_MS;
+      const session = newSession("admin", null, null, maxAgeMs);
       audit(db, "owner", "admin.session_created", "owner", {}, ip);
-      sendJson(res, 200, { authenticated: true, csrf: session.csrf }, { "Set-Cookie": cookieHeader(session.raw, config.secureCookie, false, ADMIN_SESSION_COOKIE) });
+      sendJson(res, 200, { authenticated: true, csrf: session.csrf }, { "Set-Cookie": cookieHeader(session.raw, config.secureCookie, false, ADMIN_SESSION_COOKIE, maxAgeMs) });
       return;
     }
 

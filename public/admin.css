@@ -100,6 +100,8 @@
 .admin-signin-card .stack-form { gap: 8px; }
 .admin-signin-card .stack-form label:not(:first-child) { margin-top: 6px; }
 .admin-signin-card input { height: 38px; }
+.admin-signin-card .checkbox-label { display: flex; align-items: center; gap: 8px; cursor: pointer; }
+.admin-signin-card .checkbox-label input { width: 14px; height: 14px; margin: 0; accent-color: var(--accent); }
 .admin-signin-card .full-button { margin-top: 6px; }
 .admin-signin-card .signin-foot { font-size: 9px; }
 @media (max-width: 820px) {

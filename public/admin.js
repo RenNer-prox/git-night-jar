@@ -931,7 +931,11 @@ $("#admin-login-form").addEventListener("submit", async (event) => {
   try {
     const result = await api("/api/admin/login", {
       method: "POST",
-      body: { password: $("#admin-password").value, totp: $("#admin-totp").value },
+      body: {
+        password: $("#admin-password").value,
+        totp: $("#admin-totp").value,
+        keepSignedIn: $("#admin-remember").checked,
+      },
     });
     state.csrf = result.csrf;
     await bootstrap();
