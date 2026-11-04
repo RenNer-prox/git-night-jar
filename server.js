@@ -674,6 +674,14 @@ function createDatabase(path) {
       throw error;
     }
   }
+  if (!db.prepare("SELECT version FROM schema_migrations WHERE version = 12").get()) {
+    db.exec(`
+      BEGIN IMMEDIATE;
+      UPDATE tokens SET expires_at = NULL;
+      INSERT INTO schema_migrations(version, applied_at) VALUES (12, CURRENT_TIMESTAMP);
+      COMMIT;
+    `);
+  }
   return db;
 }
 
@@ -687,7 +695,7 @@ function parseAdminArgs(args) {
       continue;
     }
     const key = item.slice(2);
-    if (!["label", "account-label", "account-id", "uses", "expires", "permissions", "features", "rank"].includes(key)) {
+    if (!["label", "account-label", "account-id", "uses", "permissions", "features", "rank"].includes(key)) {
       throw new Error(`Unknown option: ${item}`);
     }
     const value = args[index + 1];
@@ -748,7 +756,7 @@ export async function runAdminCommand(args, options = {}) {
         items: rows.map((row) => ({
           ...row,
           permissions: safeJson(row.permissions_json, []),
-          status: row.revoked_at ? "revoked" : (row.expires_at && Date.parse(row.expires_at) <= Date.now() ? "expired" : (row.usage_limit !== null && row.usage_count >= row.usage_limit ? "redeemed" : "active")),
+          status: row.revoked_at ? "revoked" : (row.usage_limit !== null && row.usage_count >= row.usage_limit ? "redeemed" : "active"),
         })),
       };
     }
@@ -804,12 +812,7 @@ export async function runAdminCommand(args, options = {}) {
       const accountLabel = flags["account-label"]?.trim().slice(0, 80) || label;
       const accountId = flags["account-id"] || randomUUID();
       if (flags["account-id"] && !/^[0-9a-f-]{36}$/i.test(accountId)) throw new Error("--account-id must be an account UUID from `npm run manage -- accounts list`.");
-      let expiresAt = null;
-      if (flags.expires) {
-        const time = Date.parse(flags.expires);
-        if (!Number.isFinite(time) || time <= Date.now()) throw new Error("--expires must be a future date or timestamp (for example 2026-12-31 or 2026-12-31T23:59:00Z).");
-        expiresAt = new Date(time).toISOString();
-      }
+      const expiresAt = null;
       let usageLimit = 1;
       if (flags.uses) {
         usageLimit = Number(flags.uses);
@@ -924,7 +927,7 @@ function rowToToken(row) {
     createdAt: row.created_at,
     lastUsedAt: row.last_used_at,
     revokedAt: row.revoked_at,
-    status: row.revoked_at ? "revoked" : (row.expires_at && Date.parse(row.expires_at) <= Date.now() ? "expired" : (row.usage_limit !== null && row.usage_count >= row.usage_limit ? "redeemed" : "active")),
+    status: row.revoked_at ? "revoked" : (row.usage_limit !== null && row.usage_count >= row.usage_limit ? "redeemed" : "active"),
   };
 }
 
@@ -1650,7 +1653,7 @@ export async function createApp(options = {}) {
         FROM tokens ORDER BY created_at DESC LIMIT 500`).all();
       const now = Date.now();
       const tokens = rows.map((row) => {
-        const status = row.revoked_at ? "revoked" : (row.expires_at && Date.parse(row.expires_at) <= now ? "expired" : "active");
+        const status = row.revoked_at ? "revoked" : (row.usage_limit !== null && row.usage_count >= row.usage_limit ? "redeemed" : "active");
         return {
           id: row.id,
           tokenIdMasked: `••••${row.id.slice(-6)}`,
@@ -1772,13 +1775,29 @@ export async function createApp(options = {}) {
       if (typeof body.token !== "string" || body.token.length < 24 || body.token.length > 128) {
         throw new HttpError(401, "Invitation token was not recognized.", "invalid_token");
       }
-      const token = db.prepare(`SELECT t.*, a.revoked_at AS account_revoked, a.label AS account_label
+      const email = typeof body.email === "string" ? body.email.trim().toLowerCase() : "";
+      const password = typeof body.password === "string" ? body.password : "";
+      if (email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        throw new HttpError(400, "Enter a valid email address.", "invalid_email");
+      }
+      if (password.length < 12 || password.length > 128) {
+        throw new HttpError(400, "Password must be between 12 and 128 characters.", "invalid_password");
+      }
+      if (typeof body.confirmPassword !== "string" || body.confirmPassword !== password) {
+        throw new HttpError(400, "The password confirmation does not match.", "password_mismatch");
+      }
+      const token = db.prepare(`SELECT t.*, a.revoked_at AS account_revoked, a.label AS account_label,
+        a.email AS account_email, a.password_hash AS account_password_hash
         FROM tokens t JOIN accounts a ON a.id = t.account_id WHERE t.token_hash = ?`).get(hash(body.token));
       if (!token || token.revoked_at || token.account_revoked || (token.expires_at && Date.parse(token.expires_at) <= Date.now())) {
-        throw new HttpError(401, "Invitation token is invalid, expired, or revoked.", "invalid_token");
+        throw new HttpError(401, "Invitation token is invalid or revoked.", "invalid_token");
       }
       if (token.usage_limit !== null && token.usage_count >= token.usage_limit) {
         throw new HttpError(401, "This invitation was already redeemed. The signed-in browser uses its secure session cookie; ask the owner for a replacement if you need to sign in again.", "usage_limit_reached");
+      }
+      if (token.account_password_hash &&
+          (token.account_email !== email || !(await verifyPassword(password, token.account_password_hash)))) {
+        throw new HttpError(401, "Email or password was not recognized for this invitation.", "invalid_credentials");
       }
       const live = db.prepare("SELECT * FROM sessions WHERE account_id = ? AND principal = 'user'").all(token.account_id)
         .filter((session) => Date.now() - Date.parse(session.last_seen_at) <= SESSION_IDLE_MS && Date.parse(session.expires_at) > Date.now());
@@ -1787,12 +1806,46 @@ export async function createApp(options = {}) {
         audit(db, "system", "token.concurrent_use", token.id, { sessionCount: live.length }, ip);
         throw new HttpError(409, "This account was signed in elsewhere. Its access has been revoked; ask the owner for a replacement invitation.", "concurrent_session");
       }
-      db.prepare("DELETE FROM sessions WHERE account_id = ?").run(token.account_id);
-      db.prepare("UPDATE tokens SET usage_count = usage_count + 1, last_used_at = ? WHERE id = ?")
-        .run(new Date().toISOString(), token.id);
-      const session = newSession("user", token.account_id, token.id);
+      let session;
+      let account;
+      const now = new Date().toISOString();
+      db.exec("BEGIN IMMEDIATE");
+      try {
+        const freshToken = db.prepare(`SELECT t.*, a.revoked_at AS account_revoked, a.label AS account_label,
+          a.email AS account_email, a.password_hash AS account_password_hash
+          FROM tokens t JOIN accounts a ON a.id = t.account_id WHERE t.id = ?`).get(token.id);
+        if (!freshToken || freshToken.revoked_at || freshToken.account_revoked ||
+            (freshToken.expires_at && Date.parse(freshToken.expires_at) <= Date.now()) ||
+            (freshToken.usage_limit !== null && freshToken.usage_count >= freshToken.usage_limit)) {
+          throw new HttpError(401, "This invitation was already redeemed or revoked.", "invalid_token");
+        }
+        if (freshToken.account_password_hash) {
+          if (freshToken.account_email !== email || !(await verifyPassword(password, freshToken.account_password_hash))) {
+            throw new HttpError(401, "Email or password was not recognized for this invitation.", "invalid_credentials");
+          }
+        } else {
+          const existingEmail = db.prepare("SELECT id FROM accounts WHERE email = ? AND id != ?").get(email, freshToken.account_id);
+          if (existingEmail) throw new HttpError(409, "An account already uses that email address.", "email_exists");
+          const passwordHash = await hashPassword(password);
+          db.prepare("UPDATE accounts SET email = ?, password_hash = ? WHERE id = ? AND password_hash IS NULL")
+            .run(email, passwordHash, freshToken.account_id);
+        }
+        db.prepare("DELETE FROM sessions WHERE account_id = ?").run(freshToken.account_id);
+        const redeemed = db.prepare(`UPDATE tokens SET usage_count = usage_count + 1, last_used_at = ?
+          WHERE id = ? AND revoked_at IS NULL AND (usage_limit IS NULL OR usage_count < usage_limit)`)
+          .run(now, freshToken.id);
+        if (!redeemed.changes) throw new HttpError(401, "This invitation was already redeemed or revoked.", "usage_limit_reached");
+        session = newSession("user", freshToken.account_id, freshToken.id);
+        account = db.prepare("SELECT * FROM accounts WHERE id = ?").get(freshToken.account_id);
+        db.exec("COMMIT");
+      } catch (error) {
+        if (db.isTransaction) db.exec("ROLLBACK");
+        if (error.code === "ERR_SQLITE_ERROR" && /UNIQUE/.test(error.message)) {
+          throw new HttpError(409, "An account already uses that email address.", "email_exists");
+        }
+        throw error;
+      }
       audit(db, token.account_label, "session.created", token.account_id, { tokenId: token.id }, ip);
-      const account = db.prepare("SELECT * FROM accounts WHERE id = ?").get(token.account_id);
       sendJson(res, 200, {
         authenticated: true,
         account: {
@@ -2824,13 +2877,7 @@ export async function createApp(options = {}) {
       if (!Array.isArray(features) || features.some((item) => !FEATURES.includes(item) || !permissions.includes(item))) {
         throw new HttpError(400, "Choose valid account features that are also permitted.");
       }
-      let expiresAt = null;
-      if (body.expiresAt !== undefined && body.expiresAt !== null && body.expiresAt !== "") {
-        if (typeof body.expiresAt !== "string" || !Number.isFinite(Date.parse(body.expiresAt)) || Date.parse(body.expiresAt) <= Date.now()) {
-          throw new HttpError(400, "Expiration must be a future date.");
-        }
-        expiresAt = new Date(body.expiresAt).toISOString();
-      }
+      const expiresAt = null;
       const usageLimit = body.usageLimit === "" || body.usageLimit === null || body.usageLimit === undefined
         ? 1 : Number(body.usageLimit);
       if (usageLimit !== 1) {
@@ -3596,12 +3643,11 @@ Create options:
 --account-id <uuid>              Add a replacement invitation to an existing account
 --rank <rank-id>                 basic,full,standard,with-ai,without-ai or custom
 --uses 1                         Every invitation is single-use
---expires <date-or-timestamp>    e.g. 2026-12-31
 --permissions <comma-list>       browse,bookmarks,history,settings,assistant,games,support
 --features <comma-list|none>     bookmarks,history,settings,assistant,games,support
  
-Each invitation can be redeemed once. The signed-in browser uses an HttpOnly cookie session;
-use \`token renew\` to issue a replacement. Basic includes 20 lifetime local AI requests per
+Invitations never expire and can be revoked by the owner; each is redeemed once, then the
+recipient sets an email and password for future sign-ins. Basic includes 20 lifetime local AI requests per
 token; With AI and Full include unlimited local AI. Legacy rank IDs remain accepted for
 existing accounts and tokens. Owner-console access remains a separate special authorization.
 Enabled features must also appear in permissions.
@@ -3613,7 +3659,7 @@ function printConsoleResult(result) {
   if (result.type === "help") {
     printConsoleHelp();
   } else if (result.type === "created") {
-    console.log(`Invitation created for ${result.accountLabel} (${result.rank}). Copy this token now; it cannot be retrieved later:\n\n${result.token}\n\nToken ID: ${result.id}\nAccount ID: ${result.accountId}\nPermissions: ${result.permissions.join(", ")}\nFeatures: ${result.features.length ? result.features.join(", ") : "none"}\nRedemptions: one\nExpires: ${result.expiresAt ?? "never"}`);
+    console.log(`Invitation created for ${result.accountLabel} (${result.rank}). Copy this token now; it cannot be retrieved later:\n\n${result.token}\n\nToken ID: ${result.id}\nAccount ID: ${result.accountId}\nPermissions: ${result.permissions.join(", ")}\nFeatures: ${result.features.length ? result.features.join(", ") : "none"}\nRedemptions: one\nExpires: never`);
   } else if (result.type === "revoked") {
     console.log(`Invitation ${result.id} revoked. Any session established with that invitation was terminated.`);
   } else if (result.type === "tokens") {

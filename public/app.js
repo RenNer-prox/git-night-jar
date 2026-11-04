@@ -1688,12 +1688,26 @@ $("#signin-form").addEventListener("submit", async (event) => {
   const error = $("#signin-error");
   error.hidden = true;
   button.disabled = true;
-  const token = $("#invite-token").value.trim();
+  const form = event.currentTarget;
+  const token = form.elements.token.value.trim();
+  const email = form.elements.email.value.trim();
+  const password = form.elements.password.value;
+  const confirmPassword = form.elements.confirmPassword.value;
+  if (password !== confirmPassword) {
+    error.textContent = "The passwords do not match.";
+    error.hidden = false;
+    button.disabled = false;
+    return;
+  }
   try {
     const guestTabs = captureGuestTabs();
-    const result = await api("/api/auth/login", { method: "POST", body: { token } });
+    const result = await api("/api/auth/login", {
+      method: "POST",
+      body: { token, email, password },
+    });
     state.csrf = result.csrf;
     await finishLogin(result, guestTabs);
+    form.reset();
   } catch (failure) {
     error.textContent = failure.message;
     error.hidden = false;

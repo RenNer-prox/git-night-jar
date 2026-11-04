@@ -149,7 +149,7 @@ function renderTokens() {
     $("#token-table").innerHTML = '<div class="table-empty">No invitations yet. Create an invitation to add a private account.</div>';
     return;
   }
-  $("#token-table").innerHTML = `<div class="admin-table-wrap"><table class="admin-table"><thead><tr><th>TOKEN / ACCOUNT</th><th>RANK / PERMISSIONS</th><th>STATUS / USES</th><th>CREATED / EXPIRES</th><th></th></tr></thead><tbody>${state.tokens.map((item) => `<tr><td><div class="table-primary">${esc(item.label)}</div><div class="table-secondary">${esc(item.accountLabel)} · ${esc(item.accountId.slice(0, 8))}</div></td><td><div class="table-primary">${esc(item.rank)}</div><div class="token-permissions">${item.permissions.map((permission) => `<span>${esc(permission)}</span>`).join("")}</div></td><td>${statusBadge(item.status)}<div class="table-secondary">${item.usageCount} / 1 redemption</div><div class="table-secondary">${item.status === "redeemed" ? "The account stays signed in by its cookie." : `Last used ${esc(date(item.lastUsedAt))}`}</div></td><td>${esc(date(item.createdAt))}<div class="table-secondary">Expires ${esc(date(item.expiresAt))}</div></td><td><div class="table-actions">${item.status !== "revoked" ? `<button class="danger-button" data-revoke-token="${item.id}" type="button">Revoke</button>` : ""}</div></td></tr>`).join("")}</tbody></table></div>`;
+  $("#token-table").innerHTML = `<div class="admin-table-wrap"><table class="admin-table"><thead><tr><th>TOKEN / ACCOUNT</th><th>RANK / PERMISSIONS</th><th>STATUS / USES</th><th>CREATED / EXPIRATION</th><th></th></tr></thead><tbody>${state.tokens.map((item) => `<tr><td><div class="table-primary">${esc(item.label)}</div><div class="table-secondary">${esc(item.accountLabel)} · ${esc(item.accountId.slice(0, 8))}</div></td><td><div class="table-primary">${esc(item.rank)}</div><div class="token-permissions">${item.permissions.map((permission) => `<span>${esc(permission)}</span>`).join("")}</div></td><td>${statusBadge(item.status)}<div class="table-secondary">${item.usageCount} / 1 redemption</div><div class="table-secondary">${item.status === "redeemed" ? "Use the account email and password to sign in." : `Last used ${esc(date(item.lastUsedAt))}`}</div></td><td>${esc(date(item.createdAt))}<div class="table-secondary">${item.revokedAt ? "Revoked" : "Never expires"}</div></td><td><div class="table-actions">${item.status !== "revoked" ? `<button class="danger-button" data-revoke-token="${item.id}" type="button">Revoke</button>` : ""}</div></td></tr>`).join("")}</tbody></table></div>`;
   $$("[data-revoke-token]").forEach((button) => button.addEventListener("click", () => void revokeToken(button.dataset.revokeToken)));
 }
 
@@ -706,8 +706,7 @@ function inviteForm() {
     <label class="form-field"><span class="field-label">Account</span><select class="field-select" name="accountId"><option value="">Create a new account</option>${accountOptions}</select></label>
     <label class="form-field"><span class="field-label">Access rank</span><select class="field-select" name="rank">${rankOptions}</select></label>
     <label class="form-field wide-field"><span class="field-label">Account label</span><input class="field-input" name="accountLabel" maxlength="80" placeholder="Defaults to token label"></label>
-    <label class="form-field"><span class="field-label">Expiration (optional)</span><input class="field-input" name="expiresAt" type="datetime-local"></label>
-    <div class="form-field"><span class="field-label">Redemption limit</span><div class="permission-note"><span class="note-icon">${icon("shield")}</span><span>One sign-in. A secure cookie keeps the intended person signed in.</span></div><input name="usageLimit" type="hidden" value="1"></div>
+    <div class="form-field"><span class="field-label">Invitation lifetime</span><div class="permission-note"><span class="note-icon">${icon("shield")}</span><span>Never expires; can be revoked anytime. Redeem once, then sign in with the email and password you set.</span></div><input name="usageLimit" type="hidden" value="1"></div>
     <div class="form-field wide-field"><span class="subsection-label">Permissions</span><div class="check-grid">
       <label class="check-option"><input type="checkbox" name="permission" value="browse" checked disabled> Browse (required)</label>
       <label class="check-option"><input type="checkbox" name="permission" value="bookmarks" checked> Bookmarks</label>
@@ -801,7 +800,6 @@ function createInviteDialog(friendMode = false) {
   $("[data-close-dialog]").addEventListener("click", closeDialog);
   $("#issue-invite").addEventListener("click", async () => {
     if (!form.reportValidity()) return;
-    const expiresAt = form.elements.expiresAt.value ? new Date(form.elements.expiresAt.value).toISOString() : "";
     const permissions = $$('input[name="permission"]:checked', form).map((input) => input.value);
     const features = $$('input[name="feature"]:checked', form).map((input) => input.value);
     const settings = {
@@ -817,7 +815,6 @@ function createInviteDialog(friendMode = false) {
       label: form.elements.label.value.trim(),
       accountLabel: form.elements.accountLabel.value.trim(),
       accountId: accountSelect.value,
-      expiresAt,
       usageLimit: form.elements.usageLimit.value,
       rank: form.elements.rank.value,
       permissions,

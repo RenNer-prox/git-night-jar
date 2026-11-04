@@ -20,15 +20,18 @@
             <span>luma<span class="brand-dot">.</span></span>
           </a>
           <p class="eyebrow">YOUR PRIVATE BROWSING SPACE</p>
-          <h1>Welcome back.</h1>
-          <p class="muted signin-copy">Enter your one-time invitation. After sign-in, this browser stays connected with a secure cookie session.</p>
+          <h1>Set up your account.</h1>
+          <p class="muted signin-copy">Redeem your never-expiring one-time invitation and set your email and password. You’ll use them for future sign-ins.</p>
           <form id="signin-form" class="stack-form">
             <label for="invite-token">Invitation token</label>
             <div class="secret-input">
               <input id="invite-token" name="token" type="password" autocomplete="off" required minlength="24" maxlength="128" placeholder="Paste your private token">
               <button id="toggle-token" type="button" class="icon-button small-icon" aria-label="Show token" title="Show token"></button>
             </div>
-            <button class="primary-button full-button" type="submit"><span>Enter workspace</span><span aria-hidden="true">↗</span></button>
+            <label for="invite-email">Email for future sign-ins</label><input id="invite-email" name="email" type="email" maxlength="254" autocomplete="email" required>
+            <label for="invite-password">Create password (12+ characters)</label><input id="invite-password" name="password" type="password" minlength="12" maxlength="128" autocomplete="new-password" required>
+            <label for="invite-password-confirm">Confirm password</label><input id="invite-password-confirm" name="confirmPassword" type="password" minlength="12" maxlength="128" autocomplete="new-password" required>
+            <button class="primary-button full-button" type="submit"><span>Redeem invitation</span><span aria-hidden="true">↗</span></button>
             <p id="signin-error" class="form-error" role="alert" hidden></p>
           </form>
           <form id="email-login-form" class="stack-form" hidden>

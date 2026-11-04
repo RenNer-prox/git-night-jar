@@ -12,6 +12,8 @@ let baseUrl;
 let adminCookie;
 let adminCsrf;
 let tempDirectory;
+const accountCredentials = new Map();
+const tokenAccounts = new Map();
 
 const ollamaFetch = async (url, options = {}) => {
   assert.equal(options.redirect, "error");
@@ -35,7 +37,21 @@ const ollamaFetch = async (url, options = {}) => {
   return new Response("not found", { status: 404 });
 };
 
-async function request(path, { method = "GET", cookie, csrf, body, origin } = {}) {
+function trackInvitation(token, accountId) {
+  const credentials = accountCredentials.get(accountId) ?? {
+    email: `test-${accountId}@example.test`,
+    password: "test-account-password-12!",
+  };
+  accountCredentials.set(accountId, credentials);
+  tokenAccounts.set(token, accountId);
+}
+
+async function request(path, { method = "GET", cookie, csrf, body, origin, autoInvitationCredentials = true } = {}) {
+  if (path === "/api/auth/login" && autoInvitationCredentials && typeof body?.token === "string") {
+    const accountId = tokenAccounts.get(body.token);
+    const credentials = accountId && accountCredentials.get(accountId);
+    if (credentials) body = { ...body, ...credentials, confirmPassword: credentials.password };
+  }
   const headers = {};
   if (cookie) headers.Cookie = cookie;
   if (csrf) headers["X-NJ-CSRF"] = csrf;
@@ -102,6 +118,7 @@ async function issueToken({ label, usageLimit = "", accountId = "", rank, friend
     },
   });
   assert.equal(response.status, 201, JSON.stringify(data));
+  trackInvitation(data.token, data.item.accountId);
   return data;
 }
 
@@ -198,6 +215,64 @@ test("serves the browser and keeps administrator routes isolated", async () => {
   assert.equal(forbiddenProxyAsset.status, 403);
   const forbidden = await request("/api/admin/summary");
   assert.equal(forbidden.response.status, 401);
+});
+
+test("invitation redemption requires setting account credentials and token cannot be reused", async () => {
+  const invite = await issueToken({ label: "Password-bound invite" });
+  assert.equal(app.db.prepare("SELECT expires_at FROM tokens WHERE id = ?").get(invite.item.id).expires_at, null);
+  const missingCredentials = await request("/api/auth/login", {
+    method: "POST",
+    body: { token: invite.token },
+    autoInvitationCredentials: false,
+  });
+  assert.equal(missingCredentials.response.status, 400);
+  assert.equal(app.db.prepare("SELECT usage_count FROM tokens WHERE id = ?").get(invite.item.id).usage_count, 0);
+
+  const credentials = accountCredentials.get(invite.item.accountId);
+  const mismatchedPassword = await request("/api/auth/login", {
+    method: "POST",
+    body: { token: invite.token, ...credentials, confirmPassword: "different-password-12!" },
+    autoInvitationCredentials: false,
+  });
+  assert.equal(mismatchedPassword.response.status, 400);
+  assert.equal(app.db.prepare("SELECT usage_count FROM tokens WHERE id = ?").get(invite.item.id).usage_count, 0);
+  const redeemed = await request("/api/auth/login", { method: "POST", body: { token: invite.token } });
+  assert.equal(redeemed.response.status, 200, JSON.stringify(redeemed.data));
+  assert.equal(app.db.prepare("SELECT email FROM accounts WHERE id = ?").get(invite.item.accountId).email, credentials.email);
+  assert.ok(app.db.prepare("SELECT password_hash FROM accounts WHERE id = ?").get(invite.item.accountId).password_hash);
+
+  const userCookie = cookieFrom(redeemed.response, "nj_session");
+  const logout = await request("/api/auth/logout", { method: "POST", cookie: userCookie, csrf: redeemed.data.csrf });
+  assert.equal(logout.response.status, 200);
+  const emailLogin = await request("/api/auth/email-login", {
+    method: "POST",
+    body: { email: credentials.email, password: credentials.password },
+  });
+  assert.equal(emailLogin.response.status, 200, JSON.stringify(emailLogin.data));
+
+  const secondCookie = cookieFrom(emailLogin.response, "nj_session");
+  const secondLogout = await request("/api/auth/logout", {
+    method: "POST", cookie: secondCookie, csrf: emailLogin.data.csrf,
+  });
+  assert.equal(secondLogout.response.status, 200);
+  const replacement = await issueToken({ label: "Password-protected replacement", accountId: invite.item.accountId });
+  const wrongPassword = await request("/api/auth/login", {
+    method: "POST",
+    body: {
+      token: replacement.token,
+      email: credentials.email,
+      password: "wrong-password-12!",
+      confirmPassword: "wrong-password-12!",
+    },
+    autoInvitationCredentials: false,
+  });
+  assert.equal(wrongPassword.response.status, 401);
+  assert.equal(app.db.prepare("SELECT revoked_at FROM accounts WHERE id = ?").get(invite.item.accountId).revoked_at, null);
+  const validReplacement = await request("/api/auth/login", { method: "POST", body: { token: replacement.token } });
+  assert.equal(validReplacement.response.status, 200);
+
+  const reused = await request("/api/auth/login", { method: "POST", body: { token: invite.token } });
+  assert.equal(reused.response.status, 401);
 });
 
 test("admin remember-me is opt-in, lasts 30 days, and remains authenticated", async () => {
@@ -696,6 +771,7 @@ test("owner CLI creates one-time invitations and revokes their active session", 
     "--uses", "1", "--permissions", "browse,bookmarks", "--features", "bookmarks",
   ], { databasePath: join(tempDirectory, "nightjar.sqlite") });
   assert.equal(created.type, "created");
+  trackInvitation(created.token, created.accountId);
   assert.equal(created.usageLimit, 1);
   assert.deepEqual(created.permissions, ["browse", "bookmarks"]);
   assert.deepEqual(created.features, ["bookmarks"]);
@@ -737,6 +813,7 @@ test("provides the five requested Luma ranks and preserves token-rank access", a
   const fullTierToken = await runAdminCommand(["token", "make", "Full tier invite", "full"], {
     databasePath: join(tempDirectory, "nightjar.sqlite"),
   });
+  trackInvitation(fullTierToken.token, fullTierToken.accountId);
   assert.equal(fullTierToken.rank, "full");
   const fullTierLogin = await request("/api/auth/login", { method: "POST", body: { token: fullTierToken.token } });
   assert.equal(fullTierLogin.response.status, 200);
@@ -955,7 +1032,7 @@ test("Owner rank is server-authorized and the token dashboard never exposes secr
   ].sort());
   assert.equal(item.tokenIdMasked, `••••${item.id.slice(-6)}`);
   assert.equal(item.aiLimit, 20);
-  assert.equal(item.status, "active");
+  assert.equal(item.status, "redeemed");
   const serialized = JSON.stringify(dashboard.data);
   assert.ok(!serialized.includes(invitation.token));
   assert.ok(!serialized.includes(ownerInvite.token));
