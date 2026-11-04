@@ -27,6 +27,10 @@ const ADMIN_SESSION_COOKIE = "nj_admin";
 const MAX_BODY_BYTES = 64 * 1024;
 const SESSION_MAX_AGE_MS = 12 * 60 * 60 * 1000;
 const SESSION_IDLE_MS = SESSION_MAX_AGE_MS;
+const GUEST_SESSION_MAX_AGE_MS = 30 * 60 * 1000;
+const GUEST_SESSION_IDLE_MS = 10 * 60 * 1000;
+const GUEST_PROXY_REQUEST_LIMIT = 1200;
+const GUEST_PROXY_SOCKET_LIMIT = 24;
 const DESKTOP_RELAY_IDLE_MS = 60_000;
 const PERMISSIONS = ["browse", "bookmarks", "history", "settings", "assistant", "games", "support", "notes", "storage", "chat", "bugs"];
 const FEATURES = ["bookmarks", "history", "settings", "assistant", "games", "support", "notes", "storage", "chat", "bugs"];
@@ -207,7 +211,15 @@ function parseCookies(header = "") {
 }
 
 function clientAddress(req) {
-  return req.socket.remoteAddress ?? "unknown";
+  const remoteAddress = req.socket.remoteAddress ?? "unknown";
+  if (["127.0.0.1", "::1", "::ffff:127.0.0.1"].includes(remoteAddress)) {
+    const forwarded = req.headers["x-forwarded-for"];
+    if (typeof forwarded === "string") {
+      const lastForwarded = forwarded.split(",").at(-1)?.trim();
+      if (lastForwarded && isIP(lastForwarded)) return lastForwarded;
+    }
+  }
+  return remoteAddress;
 }
 
 function base32Decode(text) {
@@ -963,6 +975,9 @@ export async function createApp(options = {}) {
 
   const rateLimits = new Map();
   const userLoginLimit = options.userLoginLimit ?? 12;
+  const guestGrantLimit = options.guestGrantLimit ?? 10;
+  const guestSessionLimit = options.guestSessionLimit ?? 3;
+  const guestProxyRequestLimit = options.guestProxyRequestLimit ?? GUEST_PROXY_REQUEST_LIMIT;
   let activeAiRequests = 0;
   const config = {
     secureCookie: options.secureCookie ?? env("NODE_ENV", "development") === "production",
@@ -1012,10 +1027,17 @@ export async function createApp(options = {}) {
   const proxyOrigin = () => configuredProxyOrigin || `http://${proxyHost}:${proxyServer?.address()?.port ?? proxyPort}`;
   const rammerheadSessions = new Map();
   const proxySockets = new Map();
+  const guestProxySocketCounts = new Map();
   const proxyMaintenanceTimer = setInterval(() => {
     const now = Date.now();
     expireDesktopRelayIfInactive(now);
     for (const [engineSessionId, record] of rammerheadSessions) {
+      if (record.principal === "guest") {
+        if (record.expiresAt <= now || now - record.lastSeenAt > GUEST_SESSION_IDLE_MS) {
+          closeRammerheadSession(engineSessionId);
+        }
+        continue;
+      }
       const live = db.prepare("SELECT last_seen_at, expires_at FROM sessions WHERE id = ? AND principal = 'user'").get(record.userSessionId);
       if (
         record.expiresAt <= now ||
@@ -1024,9 +1046,11 @@ export async function createApp(options = {}) {
         now - Date.parse(live.last_seen_at) > SESSION_IDLE_MS
       ) closeProxySession(record.userSessionId);
     }
-    for (const sessionId of proxySockets.keys()) {
-      const live = db.prepare("SELECT last_seen_at, expires_at FROM sessions WHERE id = ? AND principal = 'user'").get(sessionId);
-      if (!live || Date.parse(live.expires_at) <= now || now - Date.parse(live.last_seen_at) > SESSION_IDLE_MS) closeProxySession(sessionId);
+    for (const engineSessionId of proxySockets.keys()) {
+      if (!rammerheadSessions.has(engineSessionId)) {
+        for (const socket of proxySockets.get(engineSessionId) ?? []) socket.destroy();
+        proxySockets.delete(engineSessionId);
+      }
     }
   }, 30_000);
   proxyMaintenanceTimer.unref();
@@ -1489,37 +1513,30 @@ export async function createApp(options = {}) {
   }
 
   function closeProxySession(sessionId) {
-    const sockets = proxySockets.get(sessionId);
-    if (sockets) {
-      for (const socket of sockets) socket.destroy();
-      proxySockets.delete(sessionId);
-    }
     for (const [engineSessionId, record] of rammerheadSessions) {
       if (record.userSessionId !== sessionId) continue;
-      const engineSession = rammerhead.openSessions.get(engineSessionId);
-      if (engineSession) rammerhead.closeSession(engineSession);
-      rammerheadSessions.delete(engineSessionId);
+      closeRammerheadSession(engineSessionId);
     }
   }
 
-  function rammerheadSessionId(req, requestUrl) {
-    const direct = parseProxyUrl(new URL(req.url, proxyOrigin()).href)?.sessionId;
-    if (direct) return direct;
-    const querySessionId = requestUrl.searchParams.get("sessionId") ?? requestUrl.searchParams.get("id");
-    if (querySessionId && /^[a-f0-9]{32}$/i.test(querySessionId)) return querySessionId;
-    const referer = req.headers.referer;
-    if (!referer) return null;
-    try {
-      return parseProxyUrl(referer)?.sessionId ?? null;
-    } catch {
-      return null;
-    }
+  function closeRammerheadSession(engineSessionId) {
+    for (const socket of proxySockets.get(engineSessionId) ?? []) socket.destroy();
+    proxySockets.delete(engineSessionId);
+    const engineSession = rammerhead.openSessions.get(engineSessionId);
+    if (engineSession) rammerhead.closeSession(engineSession);
+    rammerheadSessions.delete(engineSessionId);
   }
 
   function authorizedRammerheadSession(req, requestUrl) {
     const engineSessionId = rammerheadSessionId(req, requestUrl);
     const record = engineSessionId && rammerheadSessions.get(engineSessionId);
-    if (!record || record.expiresAt <= Date.now()) return null;
+    const now = Date.now();
+    if (!record || record.expiresAt <= now || getSiteControls().maintenanceMode) return null;
+    if (record.principal === "guest") {
+      if (record.ip !== clientAddress(req) || now - record.lastSeenAt > GUEST_SESSION_IDLE_MS) return null;
+      record.lastSeenAt = now;
+      return { engineSessionId, principal: "guest", ip: record.ip };
+    }
     const session = db.prepare(`SELECT s.id, s.last_seen_at, s.expires_at, a.revoked_at, a.permissions_json,
       t.revoked_at AS token_revoked_at, t.expires_at AS token_expires_at
       FROM sessions s JOIN accounts a ON a.id = s.account_id JOIN tokens t ON t.id = s.token_id
@@ -1534,7 +1551,21 @@ export async function createApp(options = {}) {
       !safeJson(session.permissions_json, []).includes("browse") ||
       getSiteControls().maintenanceMode
     ) return null;
-    return { engineSessionId, userSessionId: record.userSessionId };
+    return { engineSessionId, principal: "user", userSessionId: record.userSessionId };
+  }
+
+  function rammerheadSessionId(req, requestUrl) {
+    const direct = parseProxyUrl(new URL(req.url, proxyOrigin()).href)?.sessionId;
+    if (direct) return direct;
+    const querySessionId = requestUrl.searchParams.get("sessionId") ?? requestUrl.searchParams.get("id");
+    if (querySessionId && /^[a-f0-9]{32}$/i.test(querySessionId)) return querySessionId;
+    const referer = req.headers.referer;
+    if (!referer) return null;
+    try {
+      return parseProxyUrl(referer)?.sessionId ?? null;
+    } catch {
+      return null;
+    }
   }
 
   function allowedRammerheadDestination(requestUrl) {
@@ -1559,14 +1590,25 @@ export async function createApp(options = {}) {
     return !isIP(hostname) || isPublicAddress(hostname);
   }
 
-  function trackProxySocket(userSessionId, socket) {
-    const sockets = proxySockets.get(userSessionId) ?? new Set();
-    if (!sockets.has(socket) && sockets.size >= 128) return false;
+  function trackProxySocket(authorized, socket) {
+    const { engineSessionId, principal, ip } = authorized;
+    const sockets = proxySockets.get(engineSessionId) ?? new Set();
+    const isNewSocket = !sockets.has(socket);
+    if (isNewSocket && principal === "guest" &&
+        (sockets.size >= GUEST_PROXY_SOCKET_LIMIT ||
+         (guestProxySocketCounts.get(ip) ?? 0) >= GUEST_PROXY_SOCKET_LIMIT * guestSessionLimit)) return false;
+    if (isNewSocket && principal !== "guest" && sockets.size >= 128) return false;
     sockets.add(socket);
-    proxySockets.set(userSessionId, sockets);
+    proxySockets.set(engineSessionId, sockets);
+    if (isNewSocket && principal === "guest") guestProxySocketCounts.set(ip, (guestProxySocketCounts.get(ip) ?? 0) + 1);
     socket.once("close", () => {
       sockets.delete(socket);
-      if (!sockets.size) proxySockets.delete(userSessionId);
+      if (principal === "guest") {
+        const remaining = (guestProxySocketCounts.get(ip) ?? 1) - 1;
+        if (remaining <= 0) guestProxySocketCounts.delete(ip);
+        else guestProxySocketCounts.set(ip, remaining);
+      }
+      if (!sockets.size) proxySockets.delete(engineSessionId);
     });
     return true;
   }
@@ -2009,19 +2051,56 @@ export async function createApp(options = {}) {
     }
 
     if (method === "POST" && path === "/api/browser/grant") {
-      const user = requirePrincipal(session, "user");
-      requirePermission(user, "browse");
-      requireCsrf(req, user);
       validateOrigin(req);
       if (!req.headers.origin) throw new HttpError(403, "A same-origin browser request is required.", "origin_rejected");
+      const guest = !session || session.principal !== "user";
+      if (guest) {
+        consumeLimit(`guest-grant:${ip}`, guestGrantLimit, 60_000);
+        for (const [engineSessionId, record] of rammerheadSessions) {
+          if (record.principal === "guest" && record.ip === ip &&
+            (record.expiresAt <= Date.now() || Date.now() - record.lastSeenAt > GUEST_SESSION_IDLE_MS)) {
+            closeRammerheadSession(engineSessionId);
+          }
+        }
+        const activeGuestSessions = [...rammerheadSessions.values()]
+          .filter((record) => record.principal === "guest" && record.ip === ip).length;
+        if (activeGuestSessions >= guestSessionLimit) {
+          throw new HttpError(429, "Too many guest browsing sessions are active from this network. Close an unused session and try again.", "guest_session_limit");
+        }
+      } else {
+        requirePermission(session, "browse");
+        requireCsrf(req, session);
+      }
       const engineSessionId = randomBytes(16).toString("hex");
       const engineSession = new RammerheadSession({ id: engineSessionId, disableShuffling: true });
       rammerhead.openSessions.set(engineSessionId, engineSession);
+      const now = Date.now();
+      rammerheadSessions.set(engineSessionId, guest
+        ? { principal: "guest", ip, lastSeenAt: now, expiresAt: now + GUEST_SESSION_MAX_AGE_MS }
+        : { principal: "user", userSessionId: session.id, expiresAt: now + SESSION_MAX_AGE_MS });
+      sendJson(res, 200, { sessionId: engineSessionId, proxyOrigin: proxyOrigin() });
+      return;
+    }
+
+    if (method === "POST" && path === "/api/browser/adopt") {
+      validateOrigin(req);
+      const user = requirePrincipal(session, "user");
+      requirePermission(user, "browse");
+      requireCsrf(req, session);
+      const body = await readBody(req);
+      const engineSessionId = typeof body.sessionId === "string" ? body.sessionId : "";
+      if (!/^[a-f0-9]{32}$/i.test(engineSessionId)) throw new HttpError(400, "A valid guest browsing session is required.");
+      const record = rammerheadSessions.get(engineSessionId);
+      if (!record || record.principal !== "guest" || record.ip !== ip ||
+          record.expiresAt <= Date.now() || Date.now() - record.lastSeenAt > GUEST_SESSION_IDLE_MS) {
+        throw new HttpError(404, "This guest browsing session has expired. Start a new tab to continue browsing.", "guest_session_expired");
+      }
       rammerheadSessions.set(engineSessionId, {
-        userSessionId: user.id,
+        principal: "user",
+        userSessionId: session.id,
         expiresAt: Date.now() + SESSION_MAX_AGE_MS,
       });
-      sendJson(res, 200, { sessionId: engineSessionId, proxyOrigin: proxyOrigin() });
+      sendJson(res, 200, { adopted: true });
       return;
     }
 
@@ -2960,11 +3039,11 @@ export async function createApp(options = {}) {
     }
 
     if (method === "GET" && path === "/api/browser/resolve") {
-      const user = requirePrincipal(session, "user");
-      requirePermission(user, "browse");
       const address = url.searchParams.get("q") ?? "";
-      const settings = safeJson(user.account.settings_json, DEFAULT_SETTINGS);
-      sendJson(res, 200, { url: normalizeAddress(address, settings.searchProvider) });
+      const searchProvider = session?.principal === "user"
+        ? safeJson(session.account.settings_json, DEFAULT_SETTINGS).searchProvider
+        : DEFAULT_SETTINGS.searchProvider;
+      sendJson(res, 200, { url: normalizeAddress(address, searchProvider) });
       return;
     }
 
@@ -3281,7 +3360,8 @@ export async function createApp(options = {}) {
       if (!authorized || !allowedRammerheadDestination(url)) {
         throw new HttpError(403, "This Rammerhead request is not authorized.", "proxy_request_rejected");
       }
-      if (!trackProxySocket(authorized.userSessionId, req.socket)) {
+      if (authorized.principal === "guest") consumeLimit(`guest-proxy:${authorized.ip}`, guestProxyRequestLimit, 60_000);
+      if (!trackProxySocket(authorized, req.socket)) {
         throw new HttpError(429, "Too many concurrent Rammerhead connections.", "proxy_connection_limit");
       }
       const pending = rammerhead._onRequest(req, res, rammerhead.server1Info);
@@ -3320,7 +3400,15 @@ export async function createApp(options = {}) {
         socket.destroy();
         return;
       }
-      if (!trackProxySocket(authorized.userSessionId, socket)) {
+      if (authorized.principal === "guest") {
+        try {
+          consumeLimit(`guest-proxy:${authorized.ip}`, guestProxyRequestLimit, 60_000);
+        } catch {
+          socket.destroy();
+          return;
+        }
+      }
+      if (!trackProxySocket(authorized, socket)) {
         socket.destroy();
         return;
       }
@@ -3340,8 +3428,7 @@ export async function createApp(options = {}) {
     db,
     stop() {
       clearInterval(proxyMaintenanceTimer);
-      for (const sessionId of proxySockets.keys()) closeProxySession(sessionId);
-      for (const sessionId of rammerheadSessions.values()) closeProxySession(sessionId.userSessionId);
+      for (const engineSessionId of [...rammerheadSessions.keys()]) closeRammerheadSession(engineSessionId);
       if (ollamaChild) {
         ollamaChild.kill("SIGTERM");
         ollamaChild = null;

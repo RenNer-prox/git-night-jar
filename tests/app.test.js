@@ -151,6 +151,8 @@ test("serves the browser and keeps administrator routes isolated", async () => {
   const client = await fetch(`${baseUrl}/app.js`);
   assert.equal(client.status, 200);
   const appScript = await client.text();
+  assert.match(appScript, /function startGuest\(/);
+  assert.match(appScript, /api\(\"\/api\/browser\/adopt\"/);
   assert.match(appScript, /function openHelp\(\)/);
   assert.match(appScript, /https:\/\/gn-math\.dev/);
   assert.match(appScript, /function openQuickMathGame\(\)/);
@@ -195,6 +197,67 @@ test("serves the browser and keeps administrator routes isolated", async () => {
   assert.equal(forbiddenProxyAsset.status, 403);
   const forbidden = await request("/api/admin/summary");
   assert.equal(forbidden.response.status, 401);
+});
+
+test("guests can browse without a token but remain isolated from private account APIs", async () => {
+  const anonymousMe = await request("/api/me");
+  assert.equal(anonymousMe.response.status, 200);
+  assert.equal(anonymousMe.data.authenticated, false);
+
+  const guestGrant = await request("/api/browser/grant", {
+    method: "POST",
+    body: {},
+    origin: baseUrl,
+  });
+  assert.equal(guestGrant.response.status, 200, JSON.stringify(guestGrant.data));
+  assert.match(guestGrant.data.sessionId, /^[a-f0-9]{32}$/i);
+  assert.equal(guestGrant.data.proxyOrigin, `http://127.0.0.1:${app.proxyServer.address().port}`);
+
+  const guestProxyScript = await fetch(`${guestGrant.data.proxyOrigin}/rammerhead.js?sessionId=${guestGrant.data.sessionId}`);
+  assert.equal(guestProxyScript.status, 200);
+  assert.match(guestProxyScript.headers.get("content-type"), /javascript/);
+  const guestBlockedLoopback = await fetch(`${guestGrant.data.proxyOrigin}/${guestGrant.data.sessionId}/http://127.0.0.1:${app.proxyServer.address().port}/`);
+  assert.equal(guestBlockedLoopback.status, 403);
+
+  for (const path of ["/api/session", "/api/capabilities", "/api/notes", "/api/storage", "/api/chat/contacts", "/api/admin/summary"]) {
+    const denied = await request(path);
+    assert.ok([401, 403].includes(denied.response.status), `${path} unexpectedly returned ${denied.response.status}`);
+  }
+  const guestAdmin = await request("/api/admin/login");
+  assert.equal(guestAdmin.response.status, 404);
+  const anonymousAdopt = await request("/api/browser/adopt", {
+    method: "POST",
+    body: { sessionId: guestGrant.data.sessionId },
+    origin: baseUrl,
+  });
+  assert.equal(anonymousAdopt.response.status, 401);
+
+  const issued = await issueToken({ label: "Guest upgrade" });
+  const login = await request("/api/auth/login", { method: "POST", body: { token: issued.token } });
+  assert.equal(login.response.status, 200, JSON.stringify(login.data));
+  const cookie = cookieFrom(login.response, "nj_session");
+  assert.equal((await request("/api/session", { cookie })).response.status, 200);
+  const adopted = await request("/api/browser/adopt", {
+    method: "POST",
+    cookie,
+    csrf: login.data.csrf,
+    body: { sessionId: guestGrant.data.sessionId },
+    origin: baseUrl,
+  });
+  assert.equal(adopted.response.status, 200, JSON.stringify(adopted.data));
+  assert.equal(adopted.data.adopted, true);
+  const upgradedProxyScript = await fetch(`${guestGrant.data.proxyOrigin}/rammerhead.js?sessionId=${guestGrant.data.sessionId}`);
+  assert.equal(upgradedProxyScript.status, 200);
+
+  const authenticatedGrant = await request("/api/browser/grant", {
+    method: "POST",
+    cookie,
+    csrf: login.data.csrf,
+    body: {},
+    origin: baseUrl,
+  });
+  assert.equal(authenticatedGrant.response.status, 200, JSON.stringify(authenticatedGrant.data));
+  assert.notEqual(authenticatedGrant.data.sessionId, guestGrant.data.sessionId);
 });
 
 test("desktop viewer launches once and requires the issuing owner session", async () => {

@@ -52,6 +52,7 @@ const defaults = {
 };
 const state = {
   account: null,
+  guest: false,
   csrf: "",
   tabs: [],
   activeId: null,
@@ -101,7 +102,6 @@ function getStorageKey(name) {
 }
 
 function saveLocalState() {
-  if (!state.account) return;
   try {
     localStorage.setItem(getStorageKey("tabs"), JSON.stringify({
       tabs: state.tabs.map(({ id, title, url, stack, index }) => ({ id, title, url, stack, index })),
@@ -289,9 +289,8 @@ window.addEventListener("message", (event) => {
       return;
     }
     postProxy({ type: "nightjar:init", sessionId: state.proxySessionId, appOrigin: location.origin });
-  } else if (event.data.type === "nightjar:initialized") {
+  } else   if (event.data.type === "nightjar:initialized") {
     state.proxyReady = true;
-    state.proxySessionId = "";
     const tab = activeTab();
     if (tab?.url) {
       postProxy({ type: "nightjar:select", tabId: tab.id, url: tab.url });
@@ -310,7 +309,7 @@ window.addEventListener("message", (event) => {
       tab.title = typeof event.data.title === "string" ? event.data.title.slice(0, 90) : originOf(tab.url);
       if (tab.id === state.activeId) {
         $("#address").value = tab.url;
-        if (state.account.permissions.includes("history")) {
+        if (state.account?.permissions.includes("history")) {
           api("/api/history", { method: "POST", body: { url: tab.url, title: tab.title } }).catch((error) => toast(error.message));
         }
       }
@@ -421,7 +420,7 @@ async function navigate(address, { replace = false, tab = activeTab() } = {}) {
     }
     renderTabs();
     saveLocalState();
-    if (state.account.permissions.includes("history")) {
+    if (state.account?.permissions.includes("history")) {
       api("/api/history", { method: "POST", body: { url, title: tab.title } }).catch((error) => toast(error.message));
     }
     await refreshBookmarks(false);
@@ -511,8 +510,9 @@ function showHome() {
   }
 }
 
-function applyDisplay(result) {
+function applyDisplay(result, { keepProxy = false } = {}) {
   state.account = result.account;
+  state.guest = false;
   state.csrf = result.csrf;
   state.settings = { ...defaults, ...result.account.settings, privacy: { ...defaults.privacy, ...(result.account.settings?.privacy ?? {}) } };
   $("#signin").hidden = true;
@@ -529,8 +529,51 @@ function applyDisplay(result) {
   if (!state.heartbeatTimer) state.heartbeatTimer = setInterval(() => heartbeat(), 25_000);
   renderTabs();
   if (activeTab()) selectTab(activeTab().id);
-  void prepareProxyShell();
+  if (keepProxy) {
+    $("#page-frame").src = `${state.proxyOrigin}/proxy-shell.html`;
+  } else {
+    state.proxyReady = false;
+    state.proxySessionId = "";
+    $("#page-frame").src = "about:blank";
+    void prepareProxyShell();
+  }
   document.title = `Luma — ${state.account.label}`;
+}
+
+function startGuest(retainedTabs = null) {
+  state.guest = true;
+  state.account = {
+    id: "guest",
+    label: "Guest",
+    rank: "guest",
+    settings: { ...defaults },
+    permissions: ["browse"],
+    features: [],
+  };
+  state.csrf = "";
+  state.settings = { ...defaults, privacy: { ...defaults.privacy }, toolbarOrder: [...defaults.toolbarOrder] };
+  $("#signin").hidden = true;
+  $("#browser").hidden = false;
+  $("#account-label").textContent = "Guest · Add token";
+  $(".avatar").textContent = "G";
+  $("#guest-continue").hidden = true;
+  $("#signout").hidden = true;
+  applySettings();
+  applyAccountFeatures();
+  $("#home-date").textContent = new Intl.DateTimeFormat(undefined, { dateStyle: "medium" }).format(new Date());
+  if (retainedTabs) {
+    state.tabs = retainedTabs.tabs;
+    state.activeId = retainedTabs.activeId;
+    state.closed = retainedTabs.closed;
+  } else {
+    loadLocalState();
+  }
+  renderTabs();
+  void refreshBookmarks();
+  void refreshCapabilities();
+  void prepareProxyShell();
+  if (activeTab()) selectTab(activeTab().id);
+  document.title = "Luma — Browse as guest";
 }
 
 function applyAccountFeatures() {
@@ -546,6 +589,10 @@ function applyAccountFeatures() {
   $("#notes-open").hidden = !permits("notes");
   $("#storage-open").hidden = !permits("storage");
   $("#chat-open").hidden = !permits("chat");
+  $("#rank-store-open").hidden = state.guest;
+  $("#bugs-open").hidden = state.guest;
+  $("#project-areas-card").hidden = state.guest;
+  $("#signout").hidden = state.guest;
 }
 
 async function saveToolbarOrder(order) {
@@ -626,7 +673,7 @@ async function api(path, options = {}) {
   }
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
-    if (response.status === 401 && state.account) signOut(false);
+    if (response.status === 401 && state.account && !state.guest) signOut(false);
     throw new Error(data.error ?? "The request could not be completed.");
   }
   return data;
@@ -745,6 +792,11 @@ function renderQuickLinks() {
 }
 
 async function refreshCapabilities() {
+  if (state.guest) {
+    state.capabilities = null;
+    $("#assistant-open").hidden = true;
+    return;
+  }
   try {
     state.capabilities = await api("/api/capabilities");
     const hasPermission = state.account?.permissions.includes("assistant") && state.account?.features.includes("assistant");
@@ -1563,14 +1615,16 @@ function showContextMenu(x, y, items) {
 function signIn() {
   $("#signin").hidden = false;
   $("#browser").hidden = true;
+  $("#guest-continue").hidden = !state.guest;
   $("#signin-error").hidden = true;
+  showAuthView("token");
   $("#invite-token").focus();
   document.title = "Luma — private browsing space";
 }
 
 async function signOut(callServer = true) {
   const clear = state.settings.privacy.clearOnExit;
-  if (callServer && state.account) {
+  if (callServer && state.account && !state.guest) {
     try {
       if (clear && state.account.permissions.includes("history") && state.account.features.includes("history")) {
         await api("/api/history", { method: "DELETE" });
@@ -1580,7 +1634,7 @@ async function signOut(callServer = true) {
       toast(error.message);
     }
   }
-  if (clear && state.account) localStorage.removeItem(getStorageKey("tabs"));
+  if (clear && state.account && !state.guest) localStorage.removeItem(getStorageKey("tabs"));
   if (state.proxyReady) postProxy({ type: "nightjar:shutdown" });
   state.proxyReady = false;
   state.proxySessionId = "";
@@ -1588,6 +1642,7 @@ async function signOut(callServer = true) {
   $("#page-frame").src = "about:blank";
   closeDialog();
   state.account = null;
+  state.guest = false;
   state.csrf = "";
   state.settings = { ...defaults, privacy: { ...defaults.privacy }, toolbarOrder: [...defaults.toolbarOrder] };
   state.tabs = [];
@@ -1600,7 +1655,7 @@ async function signOut(callServer = true) {
   state.assistantConversation = [];
   state.assistantBusy = false;
   sessionStorage.removeItem("nightjar.csrf");
-  signIn();
+  startGuest();
 }
 
 function setupCursor() {
@@ -1635,9 +1690,10 @@ $("#signin-form").addEventListener("submit", async (event) => {
   button.disabled = true;
   const token = $("#invite-token").value.trim();
   try {
+    const guestTabs = captureGuestTabs();
     const result = await api("/api/auth/login", { method: "POST", body: { token } });
     state.csrf = result.csrf;
-    applyDisplay(result);
+    await finishLogin(result, guestTabs);
   } catch (failure) {
     error.textContent = failure.message;
     error.hidden = false;
@@ -1645,6 +1701,30 @@ $("#signin-form").addEventListener("submit", async (event) => {
     button.disabled = false;
   }
 });
+
+function captureGuestTabs() {
+  return state.guest ? { tabs: state.tabs, activeId: state.activeId, closed: state.closed } : null;
+}
+
+async function finishLogin(result, guestTabs) {
+  let keepProxy = false;
+  if (guestTabs && state.proxySessionId) {
+    try {
+      await api("/api/browser/adopt", { method: "POST", body: { sessionId: state.proxySessionId } });
+      keepProxy = true;
+    } catch (error) {
+      toast(error.message);
+    }
+  }
+  applyDisplay(result, { keepProxy });
+  if (!guestTabs) return;
+  state.tabs = guestTabs.tabs;
+  state.activeId = guestTabs.activeId;
+  state.closed = guestTabs.closed;
+  renderTabs();
+  if (activeTab()) selectTab(activeTab().id);
+  saveLocalState();
+}
 
 function showAuthView(view) {
   $("#signin-form").hidden = view !== "token";
@@ -1665,13 +1745,14 @@ $("#email-login-form").addEventListener("submit", async (event) => {
   button.disabled = true;
   error.hidden = true;
   try {
+    const guestTabs = captureGuestTabs();
     const result = await api("/api/auth/email-login", {
       method: "POST",
       body: { email: form.elements.email.value.trim(), password: form.elements.password.value },
     });
     form.reset();
     state.csrf = result.csrf;
-    applyDisplay(result);
+    await finishLogin(result, guestTabs);
   } catch (failure) {
     error.textContent = failure.message;
     error.hidden = false;
@@ -1686,6 +1767,7 @@ $("#basic-signup-form").addEventListener("submit", async (event) => {
   button.disabled = true;
   error.hidden = true;
   try {
+    const guestTabs = captureGuestTabs();
     const result = await api("/api/auth/basic-signup", {
       method: "POST",
       body: {
@@ -1696,7 +1778,7 @@ $("#basic-signup-form").addEventListener("submit", async (event) => {
     });
     form.reset();
     state.csrf = result.csrf;
-    applyDisplay(result);
+    await finishLogin(result, guestTabs);
   } catch (failure) {
     error.textContent = failure.message;
     error.hidden = false;
@@ -1738,7 +1820,17 @@ $("#signout").addEventListener("click", () => {
   if (confirm("Sign out of this private workspace?")) void signOut(true);
 });
 $("#account-chip").addEventListener("click", () => {
+  if (state.guest) {
+    signIn();
+    return;
+  }
   toast(`Signed in as ${state.account.label}. This account has one active browser session.`, 3800);
+});
+$("#guest-continue").addEventListener("click", () => {
+  $("#signin").hidden = true;
+  $("#browser").hidden = false;
+  $("#guest-continue").hidden = true;
+  if (activeTab()) selectTab(activeTab().id);
 });
 $("#address-form").addEventListener("submit", (event) => {
   event.preventDefault();
@@ -1867,7 +1959,7 @@ async function bootstrap() {
     state.csrf = result.csrf;
     applyDisplay(result);
   } catch {
-    signIn();
+    startGuest();
   }
 }
 

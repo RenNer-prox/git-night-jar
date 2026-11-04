@@ -48,6 +48,7 @@
             <button class="text-button" type="button" data-auth-view="email-login">Email sign in</button>
             <button class="text-button" type="button" data-auth-view="signup">Create free Basic account</button>
             <button class="text-button" type="button" data-auth-view="token">Use invitation token</button>
+            <button id="guest-continue" class="text-button" type="button" hidden>Continue browsing as guest</button>
           </div>
           <div class="signin-foot"><span class="status-dot"></span> Basic is free <span class="sep-dot">·</span> Higher ranks use private invitations</div>
         </div>
@@ -116,7 +117,7 @@
                   <button class="secondary-button" id="storage-open" type="button">Cloud storage</button>
                   <button class="secondary-button" id="chat-open" type="button">Chat</button>
                   <button class="secondary-button" id="rank-store-open" type="button">Rank store</button>
-                  <a class="secondary-button" href="/bugs">Report a bug</a>
+                  <a class="secondary-button" id="bugs-open" href="/bugs">Report a bug</a>
                 </div>
               </section>
               <section class="project-areas-card" id="project-areas-card" aria-labelledby="project-areas-title">

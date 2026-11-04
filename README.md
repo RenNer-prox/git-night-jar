@@ -5,7 +5,7 @@ Luma is a browser workspace with free Basic accounts, higher ranks provisioned b
 ## Included features
 
 - Browser-like workspace with tabs, HTTP(S) address/search, page titles, navigation, reload/stop, bookmarks, paginated history, recently closed tabs, homepage/search settings, keyboard shortcuts and session preferences. Bare terms and addresses without a recognized domain suffix use the selected search provider.
-- Rammerhead-managed in-app browsing through a **separate origin and server port**. The main application and account cookies stay on the Luma origin. Each Rammerhead session is bound to an authenticated Luma session; outbound destinations are limited to public HTTP(S) hosts on ports 80/443, and private/reserved IP addresses are blocked.
+- Rammerhead-managed in-app browsing through a **separate origin and server port**. Visitors can start browsing without an invitation; guest sessions are short-lived, IP-bound, rate-limited, and capped for concurrent sessions and sockets. Signing in later with an invitation adopts the current guest proxy session into that account when it is still valid. Account APIs and private data remain authenticated. Outbound destinations are limited to public HTTP(S) hosts on ports 80/443, and private/reserved IP addresses are blocked.
 - Database-backed bookmarks, history, settings, support requests and suggestions. Each account’s permissions are checked server-side.
 - Free Basic account signup with email/password login; higher ranks also retain the existing owner-issued one-time token login. Email addresses are not verified and there is no self-service password reset.
 - Account-isolated notes and file storage, private account-to-account chat for owner-approved friends, and private bug, support, suggestion and report flows. Uploads are stored in the local SQLite database, limited to 1 MB per file and 10 MB per account; this is not third-party cloud storage.
@@ -142,7 +142,9 @@ There is no Jellyfin integration or CORS proxy configured. To connect it safely 
 
 ## Tokens, ranks and sessions
 
-Each invitation allows exactly one successful sign-in. The server increments its redemption count atomically, then issues an HttpOnly, SameSite cookie backed by a server-side session record. The cookie persists through normal application requests and does not require the token again. Sessions expire after 12 hours of inactivity or 12 hours total. In the owner console, **Redeemed · session cookie** means the invitation was accepted once; it is not the same as a revoked invitation, and the user's browser remains signed in through its cookie.
+Browsing does not require an invitation. Each guest proxy session expires after 30 minutes total or 10 minutes idle, is bound to the connecting IP address, and has per-IP request and concurrent-session/socket limits. Guest access only authorizes the Rammerhead proxy session and public address resolution; it cannot read or change account data, use AI, or access the owner console. An authenticated user can add a token from the **Guest · Add token** account control; when the current guest session is still valid, Luma adopts that browsing session rather than interrupting its open page.
+
+Each invitation allows exactly one successful sign-in. The server increments its redemption count atomically, then issues an HttpOnly, SameSite cookie backed by a server-side session record. The cookie persists through normal application requests and does not require the token again. Signed-in sessions expire after 12 hours of inactivity or 12 hours total. In the owner console, **Redeemed · session cookie** means the invitation was accepted once; it is not the same as a revoked invitation, and the user's browser remains signed in through its cookie.
 
 Each account permits one active session. A second, different valid invitation used while its account is signed in revokes the account’s invitations and terminates the active session; the owner must issue a replacement. This is intentionally strict and may require a replacement when moving to a different browser or device. If the browser's cookie is lost or the 12-hour session expires, the owner can issue a replacement with `token renew <account-id> "Replacement" <rank>`.
 
@@ -186,7 +188,7 @@ Run:
 npm test
 ```
 
-The tests use a temporary SQLite database and mock local Ollama responses; they do not download a model or generate model output. They cover Owner-rank authorization and dashboard CORS/secrecy, friend list isolation, private project areas, token-scoped Basic AI quotas, customization permissions, rank migrations, token hashing/one-time redemption, sessions, proxy isolation, bookmarks/history/settings, and TOTP.
+The tests use a temporary SQLite database and mock local Ollama responses; they do not download a model or generate model output. They cover anonymous guest browsing and guest-to-token session adoption, account/private API isolation, Owner-rank authorization and dashboard CORS/secrecy, friend list isolation, private project areas, token-scoped Basic AI quotas, customization permissions, rank migrations, token hashing/one-time redemption, sessions, proxy isolation, bookmarks/history/settings, and TOTP.
 
 - **Port already in use:** another Luma instance may already be running. Do not start a second copy; stop the existing instance from its own terminal or change both `PORT` and `APP_ORIGIN`, and both `RAMMERHEAD_PORT` and `RAMMERHEAD_ORIGIN`.
 - **Rammerhead page does not open:** check the Luma log for “Rammerhead browsing engine is ready”, confirm `RAMMERHEAD_PORT` is reachable from the browser, and ensure the app and proxy have distinct origins. Some sites remain incompatible with web-based proxying.
