@@ -134,6 +134,10 @@ before(async () => {
     dashboardOrigins: ["https://dashboard.example"],
     userLoginLimit: 100,
     ollamaFetch,
+    roundcubeUrl: "https://mail.example.test/roundcube",
+    rankPrices: { "full-minus": "Configured test price" },
+    visaGiftCardInstructions: "Wait for owner confirmation before payment.",
+    cashPaymentInstructions: "Ask the owner for a safe handoff.",
   });
   await new Promise((resolve) => app.server.listen(0, "127.0.0.1", resolve));
   await new Promise((resolve) => app.proxyServer.listen(0, "127.0.0.1", resolve));
@@ -165,6 +169,9 @@ test("serves the browser and keeps administrator routes isolated", async () => {
   const pageHtml = await page.text();
   assert.match(pageHtml, /id="theme-toggle"/);
   assert.match(pageHtml, /id="help-open"/);
+  assert.match(pageHtml, /id="email-open"/);
+  const workspaceConfig = await request("/api/workspace-config");
+  assert.deepEqual(workspaceConfig.data, { roundcubeUrl: "https://mail.example.test/roundcube" });
   const client = await fetch(`${baseUrl}/app.js`);
   assert.equal(client.status, 200);
   const appScript = await client.text();
@@ -174,6 +181,15 @@ test("serves the browser and keeps administrator routes isolated", async () => {
   assert.match(appScript, /https:\/\/gn-math\.dev/);
   assert.match(appScript, /function openQuickMathGame\(\)/);
   assert.match(appScript, /function openProjectAreaDialog/);
+  assert.match(appScript, /function renderProjectAreas\(\)/);
+  assert.match(appScript, /data-open-project-area/);
+  assert.match(appScript, /void navigate\("https:\/\/gn-math\.dev", \{ tab \}\)/);
+  assert.match(pageHtml, /id="project-open-proxy"/);
+  assert.match(pageHtml, /id="project-open-games"/);
+  assert.match(pageHtml, /id="project-open-assistant"/);
+  assert.match(pageHtml, /id="project-open-bookmarks"/);
+  assert.match(pageHtml, /id="project-open-history"/);
+  assert.match(pageHtml, /id="project-open-help"/);
   assert.match(appScript, /toolbarOrder/);
   const styles = await fetch(`${baseUrl}/styles.css`);
   assert.equal(styles.status, 200);
@@ -789,10 +805,10 @@ test("owner CLI creates one-time invitations and revokes their active session", 
 test("provides the five requested Luma ranks and preserves token-rank access", async () => {
   const ranks = await runAdminCommand(["ranks"], { databasePath: join(tempDirectory, "nightjar.sqlite") });
   const byId = new Map(ranks.items.map((rank) => [rank.id, rank]));
-  const requestedRankIds = ["basic", "full", "standard", "with-ai", "without-ai"];
+  const requestedRankIds = ["basic", "basic-plus", "ai", "full-minus", "owner"];
   assert.deepEqual(ranks.items.filter((rank) => requestedRankIds.includes(rank.id)).map((rank) => rank.id).sort(), [...requestedRankIds].sort());
-  assert.deepEqual(requestedRankIds.map((id) => byId.get(id)?.label), ["Basic", "Full", "Standard", "With AI", "Without AI"]);
-  assert.ok(!["basic-plus", "ai", "full-minus", "owner"].some((id) => byId.has(id)), "legacy built-ins should not appear in rank listings");
+  assert.deepEqual(requestedRankIds.map((id) => byId.get(id)?.label), ["Basic", "Basic+", "AI", "Full-", "Owner"]);
+  assert.ok(!["standard", "without-ai", "with-ai", "full", "legacy-owner"].some((id) => byId.has(id)), "legacy built-ins should not appear in rank listings");
   assert.ok(byId.get("basic").features.includes("assistant"));
   assert.ok(byId.get("basic").features.includes("notes"));
   const basicToken = await runAdminCommand(["token", "make", "Basic invite", "basic"], {
@@ -810,15 +826,15 @@ test("provides the five requested Luma ranks and preserves token-rank access", a
   assert.equal(aiToken.rank, "ai");
   assert.ok(aiToken.features.includes("bookmarks"));
   assert.ok(!aiToken.features.includes("settings"));
-  const fullTierToken = await runAdminCommand(["token", "make", "Full tier invite", "full"], {
+  const fullTierToken = await runAdminCommand(["token", "make", "AI tier invite", "ai"], {
     databasePath: join(tempDirectory, "nightjar.sqlite"),
   });
   trackInvitation(fullTierToken.token, fullTierToken.accountId);
-  assert.equal(fullTierToken.rank, "full");
+  assert.equal(fullTierToken.rank, "ai");
   const fullTierLogin = await request("/api/auth/login", { method: "POST", body: { token: fullTierToken.token } });
   assert.equal(fullTierLogin.response.status, 200);
   const fullTierCookie = cookieFrom(fullTierLogin.response, "nj_session");
-  assert.equal((await request("/api/session", { cookie: fullTierCookie })).data.account.rank, "full");
+  assert.equal((await request("/api/session", { cookie: fullTierCookie })).data.account.rank, "ai");
   assert.notEqual((await request("/api/admin/summary", { cookie: fullTierCookie })).response.status, 200);
   const fullToken = await runAdminCommand(["token", "make", "Full invite", "full-minus"], {
     databasePath: join(tempDirectory, "nightjar.sqlite"),
@@ -855,19 +871,49 @@ test("provides the five requested Luma ranks and preserves token-rank access", a
   assert.equal((await runAdminCommand(["accounts"], { databasePath: join(tempDirectory, "nightjar.sqlite") })).type, "accounts");
 });
 
+test("migrates legacy ranks and pending rank requests to current tiers", async () => {
+  const databasePath = join(tempDirectory, "nightjar.sqlite");
+  const created = await runAdminCommand(["token", "make", "Legacy rank account", "basic-plus"], { databasePath });
+  app.db.prepare("UPDATE accounts SET rank = 'standard' WHERE id = ?").run(created.accountId);
+  app.db.prepare("UPDATE tokens SET rank = 'standard' WHERE account_id = ?").run(created.accountId);
+  app.db.prepare("INSERT INTO ranks(id, label, permissions_json, features_json, created_at) VALUES (?, ?, '[]', '[]', ?)")
+    .run("standard", "Standard", new Date().toISOString());
+  app.db.prepare("INSERT INTO ranks(id, label, permissions_json, features_json, created_at) VALUES (?, ?, '[]', '[]', ?)")
+    .run("full", "Full", new Date().toISOString());
+  app.db.prepare(`INSERT INTO rank_upgrade_requests(id, account_id, rank_id, rank_label, payment_method, created_at, updated_at)
+    VALUES (?, ?, 'full', 'Full', 'cash', ?, ?)`)
+    .run("00000000-0000-4000-8000-000000000014", created.accountId, new Date().toISOString(), new Date().toISOString());
+  app.db.prepare("DELETE FROM schema_migrations WHERE version = 14").run();
+  const ranks = await runAdminCommand(["ranks"], { databasePath });
+  assert.deepEqual(ranks.items.map((rank) => rank.id).sort(), ["ai", "basic", "basic-plus", "full-minus", "owner"]);
+  assert.equal(app.db.prepare("SELECT rank FROM accounts WHERE id = ?").get(created.accountId).rank, "basic-plus");
+  assert.equal(app.db.prepare("SELECT rank FROM tokens WHERE account_id = ?").get(created.accountId).rank, "basic-plus");
+  const request = app.db.prepare("SELECT rank_id, rank_label FROM rank_upgrade_requests WHERE id = ?")
+    .get("00000000-0000-4000-8000-000000000014");
+  assert.equal(request.rank_id, "full-minus");
+  assert.equal(request.rank_label, "Full-");
+  app.db.prepare("DELETE FROM rank_upgrade_requests WHERE id = ?").run("00000000-0000-4000-8000-000000000014");
+  assert.equal(app.db.prepare("SELECT COUNT(*) AS count FROM ranks WHERE id IN ('standard', 'with-ai', 'without-ai', 'full', 'legacy-owner')").get().count, 0);
+});
+
 test("Basic signup is free and supports account email login", { timeout: 15_000 }, async () => {
   const store = await request("/api/rank-store");
   assert.equal(store.response.status, 200);
   assert.equal(store.data.checkoutConfigured, false);
   assert.deepEqual(store.data.items.map((rank) => [rank.id, rank.label]), [
     ["basic", "Basic"],
-    ["standard", "Standard"],
-    ["without-ai", "Without AI"],
-    ["with-ai", "With AI"],
-    ["full", "Full"],
+    ["basic-plus", "Basic+"],
+    ["ai", "AI"],
+    ["full-minus", "Full-"],
+    ["owner", "Owner"],
   ]);
   assert.equal(store.data.items[0].price, 0);
   assert.equal(store.data.items[0].available, true);
+  assert.equal(store.data.items.find((rank) => rank.id === "full-minus").price, "Configured test price");
+  assert.ok(store.data.items.find((rank) => rank.id === "owner").available === false);
+  assert.equal(store.data.paymentInstructions.manualReview, true);
+  assert.match(store.data.paymentInstructions.visaGiftCard, /Wait for owner confirmation/);
+  assert.match(store.data.paymentInstructions.cash, /safe handoff/);
 
   const email = `free-${Date.now()}@example.test`;
   const signup = await request("/api/auth/basic-signup", {
@@ -887,6 +933,109 @@ test("Basic signup is free and supports account email login", { timeout: 15_000 
   });
   assert.equal(login.response.status, 200, JSON.stringify(login.data));
   assert.equal(login.data.account.rank, "basic");
+});
+
+test("manual rank requests accept only rank and payment method and require owner review", async () => {
+  const signup = await request("/api/auth/basic-signup", {
+    method: "POST",
+    body: { label: "Rank request user", email: `rank-${Date.now()}@example.test`, password: "basic-account-password" },
+  });
+  assert.equal(signup.response.status, 201);
+  const userCookie = cookieFrom(signup.response, "nj_session");
+  const malformedAttempt = await request("/api/rank-store/request", {
+    method: "POST",
+    cookie: userCookie,
+    csrf: signup.data.csrf,
+    body: null,
+  });
+  assert.equal(malformedAttempt.response.status, 400);
+  const sensitiveAttempt = await request("/api/rank-store/request", {
+    method: "POST",
+    cookie: userCookie,
+    csrf: signup.data.csrf,
+    body: { rank: "full", paymentMethod: "visa_gift_card", cardNumber: "4111111111111111", pin: "1234" },
+  });
+  assert.equal(sensitiveAttempt.response.status, 400);
+  assert.equal(app.db.prepare("SELECT COUNT(*) AS count FROM rank_upgrade_requests").get().count, 0);
+
+  const ownerRankAttempt = await request("/api/rank-store/request", {
+    method: "POST",
+    cookie: userCookie,
+    csrf: signup.data.csrf,
+    body: { rank: "owner", paymentMethod: "cash" },
+  });
+  assert.equal(ownerRankAttempt.response.status, 400);
+
+  const requestResult = await request("/api/rank-store/request", {
+    method: "POST",
+    cookie: userCookie,
+    csrf: signup.data.csrf,
+    body: { rank: "full-minus", paymentMethod: "visa_gift_card" },
+  });
+  assert.equal(requestResult.response.status, 201, JSON.stringify(requestResult.data));
+  assert.equal(requestResult.data.checkoutConfigured, false);
+  assert.equal(requestResult.data.emailNotification, "not_configured");
+  const row = app.db.prepare("SELECT * FROM rank_upgrade_requests WHERE id = ?").get(requestResult.data.id);
+  assert.equal(row.rank_id, "full-minus");
+  assert.equal(row.payment_method, "visa_gift_card");
+  assert.equal(row.status, "open");
+  assert.equal(JSON.stringify(row).includes("4111111111111111"), false);
+  assert.equal(app.db.prepare("SELECT rank FROM accounts WHERE id = ?").get(signup.data.account.id).rank, "basic");
+
+  assert.equal((await request("/api/admin/rank-requests")).response.status, 401);
+  assert.equal((await request("/api/admin/rank-requests", { cookie: userCookie })).response.status, 403);
+  const inbox = await request("/api/admin/rank-requests?limit=20", { cookie: adminCookie });
+  assert.equal(inbox.response.status, 200);
+  assert.ok(inbox.data.items.some((item) => item.id === requestResult.data.id && item.paymentMethod === "visa_gift_card"));
+  const userStatusChange = await request(`/api/admin/rank-requests/${requestResult.data.id}`, {
+    method: "PATCH",
+    cookie: userCookie,
+    csrf: signup.data.csrf,
+    body: { status: "resolved" },
+  });
+  assert.equal(userStatusChange.response.status, 403);
+  assert.equal(app.db.prepare("SELECT status FROM rank_upgrade_requests WHERE id = ?").get(requestResult.data.id).status, "open");
+  const status = await request(`/api/admin/rank-requests/${requestResult.data.id}`, {
+    method: "PATCH",
+    cookie: adminCookie,
+    csrf: adminCsrf,
+    body: { status: "resolved" },
+  });
+  assert.equal(status.response.status, 200);
+  assert.equal(app.db.prepare("SELECT status FROM rank_upgrade_requests WHERE id = ?").get(requestResult.data.id).status, "resolved");
+  assert.equal(app.db.prepare("SELECT rank FROM accounts WHERE id = ?").get(signup.data.account.id).rank, "basic");
+  assert.ok(app.db.prepare("SELECT 1 FROM audit_logs WHERE action = 'rank.upgrade_requested' AND subject = ?").get(requestResult.data.id));
+  assert.ok(app.db.prepare("SELECT 1 FROM audit_logs WHERE action = 'rank.upgrade_request_status_changed' AND subject = ?").get(requestResult.data.id));
+});
+
+test("Roundcube can be left unconfigured and rejects insecure remote URLs", async () => {
+  const withoutRoundcube = await createApp({
+    databasePath: join(tempDirectory, "no-roundcube.sqlite"),
+    adminPassword: password,
+    proxyHost: "127.0.0.1",
+    proxyPort: 0,
+    aiAutostart: false,
+    roundcubeUrl: "",
+  });
+  try {
+    await new Promise((resolve) => withoutRoundcube.server.listen(0, "127.0.0.1", resolve));
+    const config = await fetch(`http://127.0.0.1:${withoutRoundcube.server.address().port}/api/workspace-config`);
+    assert.equal(config.status, 200);
+    assert.deepEqual(await config.json(), { roundcubeUrl: null });
+  } finally {
+    if (withoutRoundcube.server.listening) await new Promise((resolve) => withoutRoundcube.server.close(resolve));
+    if (withoutRoundcube.proxyServer.listening) await new Promise((resolve) => withoutRoundcube.proxyServer.close(resolve));
+    withoutRoundcube.stop();
+    withoutRoundcube.db.close();
+  }
+  await assert.rejects(createApp({
+    databasePath: join(tempDirectory, "invalid-roundcube.sqlite"),
+    adminPassword: password,
+    proxyHost: "127.0.0.1",
+    proxyPort: 0,
+    aiAutostart: false,
+    roundcubeUrl: "http://mail.example.test/roundcube",
+  }), /ROUNDCUBE_URL must be an HTTPS URL/);
 });
 
 test("notes, SQLite files, and bug reports are account-scoped", async () => {
@@ -920,6 +1069,7 @@ test("notes, SQLite files, and bug reports are account-scoped", async () => {
     body: { kind: "bug", subject: "A private bug report", message: "The settings dialog did not save." },
   });
   assert.equal(report.response.status, 201);
+  assert.equal(report.data.emailNotification, "not_configured");
   assert.equal((await request("/api/admin/feedback")).response.status, 401);
   const feedback = await request("/api/admin/feedback?limit=200", { cookie: adminCookie });
   assert.ok(feedback.data.items.some((item) => item.id === report.data.id && item.kind === "bug"));
@@ -971,9 +1121,9 @@ test("owner can manage ranks and review private support requests", async () => {
   const ranks = await request("/api/admin/ranks", { cookie: adminCookie });
   assert.equal(ranks.response.status, 200);
   assert.ok(ranks.data.items.some((rank) => rank.id === "basic"));
-  assert.deepEqual(ranks.data.items.filter((rank) => ["basic", "full", "standard", "with-ai", "without-ai"].includes(rank.id)).map((rank) => rank.id).sort(),
-    ["basic", "full", "standard", "with-ai", "without-ai"]);
-  assert.ok(!ranks.data.items.some((rank) => ["basic-plus", "ai", "full-minus", "owner"].includes(rank.id)));
+  assert.deepEqual(ranks.data.items.filter((rank) => ["basic", "basic-plus", "ai", "full-minus", "owner"].includes(rank.id)).map((rank) => rank.id).sort(),
+    ["ai", "basic", "basic-plus", "full-minus", "owner"]);
+  assert.ok(!ranks.data.items.some((rank) => ["standard", "with-ai", "without-ai", "full", "legacy-owner"].includes(rank.id)));
   const customRank = await request("/api/admin/ranks", {
     method: "POST", cookie: adminCookie, csrf: adminCsrf,
     body: { label: "Quiet reader", permissions: ["browse", "support"], features: ["support"] },

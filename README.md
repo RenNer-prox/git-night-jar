@@ -8,12 +8,13 @@ Luma is a browser workspace with free Basic accounts, higher ranks provisioned b
 - Rammerhead-managed in-app browsing through a **separate origin and server port**. Visitors can start browsing without an invitation; guest sessions are short-lived, IP-bound, rate-limited, and capped for concurrent sessions and sockets. Signing in later with an invitation adopts the current guest proxy session into that account when it is still valid. Account APIs and private data remain authenticated. Outbound destinations are limited to public HTTP(S) hosts on ports 80/443, and private/reserved IP addresses are blocked.
 - Database-backed bookmarks, history, settings, support requests and suggestions. Each account’s permissions are checked server-side.
 - Free Basic account signup with email/password login; higher ranks use owner-issued, single-use, never-expiring invitations to set their email/password for future logins. Email addresses are not verified and there is no self-service password reset.
+- Configurable Roundcube webmail access for signed-in accounts. Roundcube is a separately hosted webmail client with its own mailbox sign-in; it is not an SMTP/IMAP server and Luma does not handle mailbox credentials or contents.
 - Account-isolated notes and file storage, private account-to-account chat for owner-approved friends, and private bug, support, suggestion and report flows. Uploads are stored in the local SQLite database, limited to 1 MB per file and 10 MB per account; this is not third-party cloud storage.
-- A rank store listing Basic, Full, Standard, With AI and Without AI. Basic is free. The store can submit an upgrade request, but there is no payment processor or checkout configured and no payment is collected.
+- A rank store listing Basic, Basic+, AI, Full- and Owner. Basic is free; higher member ranks can be requested with Visa gift card or cash as the proposed payment method. Requests are stored privately for owner review; payment is verified separately and access is granted only by an owner manually changing the account. Owner administrator access is never available for purchase. There is no checkout or automatic upgrade.
 - Optional Resend email notifications for feedback and rank requests. Delivery requires `RESEND_API_KEY`, `EMAIL_FROM` and `FEEDBACK_EMAIL`; credentials remain server-side.
 - A polished Game lounge that opens the current GN Math site (`gn-math.dev`) in a fresh Rammerhead-managed Luma tab, plus an original offline arithmetic sprint. The sprint sends no game data to the server; its personal-best score is saved in that browser profile.
 - Owner console for accounts, one-time invitations, live sessions, site controls, support requests, audit events and service status. Access is enforced by the server for the separate owner login or the explicitly assigned Owner rank; hiding the console link is only a UI convenience.
-- The five listed ranks are Basic, Full, Standard, With AI and Without AI. Legacy rank IDs (including the special Owner authorization) remain stored and accepted for compatibility but are omitted from rank listings. Only the separate Owner authentication or an existing explicitly authorized Owner account can access the owner console.
+- The five listed ranks are Basic, Basic+, AI, Full- and Owner. Legacy rank IDs are migrated to the current tiers; only an explicitly assigned Owner account or the separate Owner authentication can access the owner console.
 - Private project areas per account, with initial `"[account]'s Proxy"` and `"[account]'s games"` areas. Each account can add, rename and remove its own areas; IDs and area contents are never shared across accounts.
 - A small local **Luma Searcher** desktop app with an address/search bar, back/forward/reload/home controls, and Bing, Google, DuckDuckGo, Brave, or Yandex. It renders destination websites directly with Electron's Chromium engine on the user's PC, without a web proxy.
 - Invitations are cryptographically random, stored as SHA-256 hashes, and can be redeemed once. A user’s browser then stays authenticated using an HttpOnly, SameSite cookie and a server-side session.
@@ -31,7 +32,7 @@ While sharing is active, the owner can open **Open one-time desktop tab** to get
 
 ## Linux prerequisites
 
-The optional companion currently requires a Linux Wayland session and the `grim` and `ydotool` tools, with `ydotoold` already running and usable by the signed-in desktop user. The app does not install system packages or elevate privileges. Configure `DESKTOP_COMPANION_SECRET` and the public HTTPS `APP_ORIGIN` as described below, install the Node project dependencies on the companion PC, then run `npm run companion` and approve sharing/input locally when prompted.
+The optional companion currently requires a Linux Wayland session and the `grim` and `ydotool` tools, with `ydotoold` already running and usable by the signed-in desktop user. The app does not install system packages or elevate privileges. Keep the Luma server's `DESKTOP_COMPANION_SECRET` in its owner-only, Git-ignored `.env`; configure the exact same secret in the Linux PC's local `.env`, together with the public HTTPS `APP_ORIGIN`. Never copy the real secret into `.env.example`, source code, or chat. Install the Node project dependencies on the companion PC, then run `npm run companion` and approve sharing/input locally when prompted.
 
 Invitation tokens are bearer credentials until first redemption. They never expire automatically, remain single-use, and can be revoked by the owner at any time. Single-use tokens prevent reuse after the intended person redeems them, but no cookie can determine who receives a token first. Keep invitations private and deliver them only to the intended person. On redemption, the recipient sets an email and password; subsequent sign-ins use those credentials, not the invitation token. If that browser session is lost or expires, the user can sign in with email/password.
 
@@ -91,13 +92,13 @@ Before starting services, create DNS A/AAAA records for both `example.com` and `
 
 The deployment command intentionally does not configure S3 or Jellyfin. Their setup still needs actual provider/server identifiers and credentials; see [Amazon S3 and Jellyfin](#amazon-s3-and-jellyfin). It does not install software or mutate configuration on a remote S3 bucket or Jellyfin server.
 
-To enable the desktop companion, generate a random 32-byte hex secret on a trusted machine:
+To enable the desktop companion, generate a random 32-byte hex secret on a trusted machine and place the same value in the server and companion PC's private `.env` files:
 
 ```sh
 openssl rand -hex 32
 ```
 
-Set that same value as `DESKTOP_COMPANION_SECRET` independently in the hosted Luma server's secret configuration and the Linux PC's local `.env`; never send it through chat or copy other server secrets to the PC. Set `APP_ORIGIN=https://eri.hs.vc` in the Linux PC's `.env`. The hosted server must also use that exact public HTTPS origin for its normal `APP_ORIGIN` configuration. The companion PC needs only those two settings. Start Luma normally, then run `npm run companion` on the Linux PC. While signed into `/admin`, open **Sessions** and click **Pair this owner session**; no pairing code is used. When you choose screen sharing or remote input, approve that capability by typing `YES` into the companion terminal. The companion requires Wayland plus the existing `grim`, `ydotool`, and running `ydotoold` executables/services; Luma does not install system packages, run them as root, grant device permissions, or start them automatically. Press Ctrl+C in its terminal or use the owner console's **Stop sharing & disconnect** button to end access. If the owner signs out, the owner session expires or is revoked, the browser closes, or its heartbeat is lost, the relay ends. Configure any reverse proxy in front of Luma to accept request bodies up to 8 MB for desktop frame uploads.
+Set that same value as `DESKTOP_COMPANION_SECRET` independently in the hosted Luma server's `.env` and the Linux PC's local `.env`; never send it through chat or copy other server secrets to the PC. Set `APP_ORIGIN=https://eri.hs.vc` in the Linux PC's `.env`. The hosted server must also use that exact public HTTPS origin for its normal `APP_ORIGIN` configuration. The companion PC needs only those two settings. Start Luma normally, then run `npm run companion` on the Linux PC. While signed into `/admin`, open **Sessions** and click **Pair this owner session**; no pairing code is used. When you choose screen sharing or remote input, approve that capability by typing `YES` into the companion terminal. The companion requires Wayland plus the existing `grim`, `ydotool`, and running `ydotoold` executables/services; Luma does not install system packages, run them as root, grant device permissions, or start them automatically. Press Ctrl+C in its terminal or use the owner console's **Stop sharing & disconnect** button to end access. If the owner signs out, the owner session expires or is revoked, the browser closes, or its heartbeat is lost, the relay ends. Configure any reverse proxy in front of Luma to accept request bodies up to 8 MB for desktop frame uploads.
 
 The owner panel is at `/admin`. The separately authenticated owner session and an account explicitly assigned the Owner rank can use it; all other account ranks are denied by server-side authorization. The owner password used for sign-in is the password stored when the database was initialized; setting `ADMIN_INITIAL_PASSWORD` later does not reset it. At sign-in, select **Keep me signed in for 30 days on this device** to use a longer-lived, HttpOnly admin session cookie on a private device; otherwise the admin session lasts 12 hours. Sign out to revoke the active owner session, and do not select the option on a shared or public computer. This does not disable authentication or extend regular user sessions. The desktop viewer uses the active owner session and never asks for that password a second time. Use **Friends** to invite people one at a time and remove them from the list without revoking their account. **Accounts** manages ranks, permissions, features and preferences. **Site controls** can pause user APIs and proxied browsing in maintenance mode, disable new invitations, or disable assistant access; the owner console stays available during maintenance. Create invitations from **Invitations** and copy each token before closing its one-time reveal. The database never stores the raw token.
 
@@ -109,7 +110,7 @@ When started from an interactive terminal, Luma exposes a `nightjar>` compatibil
 tokens
 accounts
 ranks
-token make "Guest laptop" standard
+token make "Guest laptop" basic-plus
 token make "Study group" basic
 token renew <account-id> "Replacement" full
 tokens revoke <token-id>
@@ -138,6 +139,11 @@ Create custom ranks with `ranks create "Study group" --permissions browse,games,
 | `OLLAMA_AUTOSTART` | `1` | Start `ollama serve` when the loopback API is unavailable; set `0` to disable. |
 | `OLLAMA_MODEL` | `qwen3:4b` | Installed local model used by the assistant. |
 | `OLLAMA_BINARY` | search `PATH` | Optional executable path/name for local Ollama. |
+| `ROUNDCUBE_URL` | unset | Optional HTTPS URL for the Roundcube webmail client. HTTP is allowed only for localhost during development. Do not include URL credentials, query parameters, or fragments. |
+| `RANK_PRICE_BASIC_PLUS`, `RANK_PRICE_AI`, `RANK_PRICE_FULL_MINUS` | unset | Optional display price text for the corresponding purchasable member rank. Use the actual amount/currency for the instance; unset prices display as “ask owner”. |
+| `RANK_VISA_GIFT_CARD_INSTRUCTIONS` | unset | Optional public instructions for arranging a Visa gift-card payment. Never request/store card numbers, PINs, CVVs, redemption codes, or card photos in Luma. |
+| `RANK_CASH_PAYMENT_INSTRUCTIONS` | unset | Optional public cash-payment instructions. No cash location is assumed when unset. |
+| `DESKTOP_COMPANION_SECRET` | unset | Private 64-character hex shared only between the Luma server and its companion PC; keep it in ignored `.env` files and never commit it. |
 | `RESEND_API_KEY` | unset | Optional server-side Resend API key for email notifications. |
 | `EMAIL_FROM` | unset | Verified sender address for Resend. |
 | `FEEDBACK_EMAIL` | unset | Owner email address that receives feedback/rank request notifications. |
@@ -173,27 +179,29 @@ Each invitation never expires automatically and allows exactly one redemption. O
 
 Each account permits one active session. Signing in to an account that is already active elsewhere with valid credentials revokes its invitations and terminates the active session; the owner must issue a replacement. If the browser's cookie is lost or the 12-hour session expires, the user can sign in again using email/password; the owner only needs to issue another invitation if access was revoked.
 
-Luma's rank listings show exactly these five built-in ranks (legacy rank IDs remain available for existing token compatibility):
+Luma's rank listings show exactly these five built-in ranks:
 
 | Rank | Features |
 |---|---|
 | Basic | Free; search/browse, notes, storage, private chat, bug reports and 20 local AI requests per token |
-| Standard | Search/browse, bookmarks, history, notes, storage, private chat and bug reports |
-| Without AI | Standard features without AI |
-| With AI | Standard features with AI |
-| Full | Customization, games, support and the listed account features |
+| Basic+ | Basic features plus bookmarks and history; limited AI requests |
+| AI | Basic+ features with unlimited AI requests |
+| Full- | AI features plus customization, games and support |
+| Owner | Full- capabilities plus owner-console access; never purchasable through the rank store |
 
-Basic signup is free and uses email/password credentials; the address is not verified, and password reset is not available. Higher-rank invitation redemption also establishes email/password credentials. The Basic AI cap is lifetime and tracked on the associated token. The rank store is a request surface only until a payment processor is configured; it does not collect money. Legacy rank records remain in storage and can still be used by existing accounts and tokens, but are omitted from rank listings. Custom ranks remain configurable from the Owner console. Built-in ranks cannot be deleted, and custom rank names or grants do not grant owner access. Owner authorization remains a separate special access path.
+Basic signup is free and uses email/password credentials; the address is not verified, and password reset is not available. Higher-rank invitation redemption also establishes email/password credentials. The Basic and Basic+ AI cap is lifetime and tracked on the associated token. The rank store is a request surface only until a payment processor is configured; it does not collect money. Existing legacy ranks are migrated to the current equivalents. Custom ranks remain configurable from the Owner console. Built-in ranks cannot be deleted, and custom rank names or grants do not grant owner access.
 
-Full accounts can change the browser tab title and icon and drag toolbar controls into a per-account order from Settings. Settings and saved layout preferences are not available to lower ranks.
+Full- accounts can change the browser tab title and icon and drag toolbar controls into a per-account order from Settings. Settings and saved layout preferences are not available to lower ranks.
 
 The token dashboard API is `GET /api/owner/dashboard/tokens`, authenticated by the existing HttpOnly `nj_admin` cookie or an explicitly assigned Owner-rank session cookie. It returns masked token IDs, rank, active/revoked/redeemed status, redemption usage, AI usage and timestamps; raw token values and hashes are never returned. Cross-origin browser access requires a comma-separated exact-origin `DASHBOARD_ORIGINS` allowlist and credentialed CORS without wildcards. Since production owner cookies remain `SameSite=Strict; Secure`, deploy the dashboard same-site with Luma (such as a sibling HTTPS subdomain), or call through a same-origin reverse proxy/BFF; unrelated-site third-party cookies are not supported.
 
-Each user's Project areas are private, account-owned organizational labels, not shared files or project source. The initial areas are named from the account label (for example, `Alex's Proxy` and `Alex's games`). Every user's CRUD API operation is scoped server-side to the signed-in account.
+Each user's Project areas are private, account-owned launch shortcuts named from the account label (for example, `Alex's Proxy` and `Alex's games`). Open Proxy creates a new Luma tab and focuses the address bar; Open games opens GN Math in a new tab through the Rammerhead proxy. The Luma tools section also links to available Notes, Storage, Chat, Email, Rank store and bug reporting features. Every project's list and CRUD API operation remains scoped server-side to the signed-in account.
 
 ## Support, suggestions and games
 
-Users with the support capability can send a request or suggestion from the in-app Help guide. Messages are stored in the Luma database and shown only in the owner’s **Support & ideas** panel; when Resend is configured, a notification is sent to the configured owner address. The owner can mark them open, in progress or resolved. Bug reports are similarly private and available from the bugs page.
+Users with the support capability can send a request or suggestion from the in-app Help guide. Messages are stored in the Luma database and shown only in the owner’s **Support & ideas** panel; when Resend is configured, a notification is sent to the configured owner address. The UI distinguishes delivered notifications from unconfigured/failed email while keeping each request in the owner console. The owner can mark them open, in progress or resolved. Bug reports are similarly private and available from the bugs page.
+
+The **Rank store** explains the manual Visa gift-card and cash process, displays only configured prices/instructions, and asks the user to select a rank and method. The request endpoint rejects any additional properties; it never accepts payment credentials or changes the account rank. The owner reviews requests under **Rank requests**, confirms payment outside Luma, and manually changes access under **Accounts**. Resolving a request does not grant a rank. The separate Roundcube button appears for signed-in accounts when `ROUNDCUBE_URL` is configured; it opens the external webmail client and does not create mailboxes or send through SMTP.
 
 Notes and uploaded files are isolated by account and enforced on every API request. File storage is SQLite on the Luma server, not a third-party cloud service. Chat is limited to accounts the owner has added as friends, and accounts can block or report messages. Reports and ban records appear only in the private owner moderation log; there is no public shaming page, and report subjects are not exposed publicly. Resend configuration is optional and its API key is never sent to browsers.
 

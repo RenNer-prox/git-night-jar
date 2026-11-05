@@ -49,6 +49,7 @@
             <button class="rail-item" data-panel="invitations" type="button"><span>⌁</span> Invitations</button>
             <button class="rail-item" data-panel="sessions" type="button"><span>◉</span> Sessions</button>
             <button class="rail-item" data-panel="site-controls" type="button"><span>⚙</span> Site controls</button>
+            <button class="rail-item" data-panel="rank-requests" type="button"><span>＄</span> Rank requests</button>
             <button class="rail-item" data-panel="support" type="button"><span>✦</span> Support & ideas</button>
             <button class="rail-item" data-panel="moderation" type="button"><span>⚑</span> Reports & bans</button>
             <button class="rail-item" data-panel="audit" type="button"><span>≡</span> Audit log</button>
@@ -99,6 +100,10 @@
             <section class="admin-panel" data-panel-content="support" hidden>
               <div class="admin-page-heading"><div><p class="eyebrow">PRIVATE FEEDBACK</p><h1>Support & ideas</h1><p>Messages are stored in this Luma database and visible only to the owner.</p></div><button id="refresh-feedback" class="secondary-button" type="button">Refresh</button></div>
               <div class="admin-section-card table-card"><div id="feedback-table"></div></div>
+            </section>
+            <section class="admin-panel" data-panel-content="rank-requests" hidden>
+              <div class="admin-page-heading"><div><p class="eyebrow">MANUAL PAYMENT REVIEW</p><h1>Rank requests</h1><p>Review method and rank requests privately. Verify payment separately, then manually grant access in Accounts; request status never grants a rank.</p></div><button id="refresh-rank-requests" class="secondary-button" type="button">Refresh</button></div>
+              <div class="admin-section-card table-card"><div id="rank-request-table"></div></div>
             </section>
             <section class="admin-panel" data-panel-content="moderation" hidden>
               <div class="admin-page-heading"><div><p class="eyebrow">PRIVATE OWNER RECORD</p><h1>Reports & ban log</h1><p>This moderation log is private to the Owner; it is not a public wall of shame.</p></div><button id="refresh-moderation" class="secondary-button" type="button">Refresh</button></div>

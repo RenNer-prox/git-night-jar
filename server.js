@@ -56,13 +56,9 @@ const DEFAULT_RANKS = [
   { id: "ai", label: "AI", permissions: ["browse", "bookmarks", "history", "assistant", "notes", "storage", "chat", "bugs"], features: ["bookmarks", "history", "assistant", "notes", "storage", "chat", "bugs"] },
   { id: "full-minus", label: "Full-", permissions: ["browse", "bookmarks", "history", "settings", "assistant", "games", "support", "notes", "storage", "chat", "bugs"], features: ["bookmarks", "history", "settings", "assistant", "games", "support", "notes", "storage", "chat", "bugs"] },
   { id: "owner", label: "Owner", permissions: ["browse", "bookmarks", "history", "settings", "assistant", "games", "support", "notes", "storage", "chat", "bugs"], features: ["bookmarks", "history", "settings", "assistant", "games", "support", "notes", "storage", "chat", "bugs"] },
-  { id: "standard", label: "Standard", permissions: ["browse", "bookmarks", "history", "notes", "storage", "chat", "bugs"], features: ["bookmarks", "history", "notes", "storage", "chat", "bugs"] },
-  { id: "with-ai", label: "With AI", permissions: ["browse", "bookmarks", "history", "assistant", "notes", "storage", "chat", "bugs"], features: ["bookmarks", "history", "assistant", "notes", "storage", "chat", "bugs"] },
-  { id: "without-ai", label: "Without AI", permissions: ["browse", "bookmarks", "history", "notes", "storage", "chat", "bugs"], features: ["bookmarks", "history", "notes", "storage", "chat", "bugs"] },
-  { id: "full", label: "Full", permissions: ["browse", "bookmarks", "history", "settings", "assistant", "games", "support", "notes", "storage", "chat", "bugs"], features: ["bookmarks", "history", "settings", "assistant", "games", "support", "notes", "storage", "chat", "bugs"] },
 ];
 const BUILT_IN_RANK_IDS = new Set(DEFAULT_RANKS.map(({ id }) => id));
-const LEGACY_RANK_IDS = new Set(["basic-plus", "ai", "full-minus", "owner"]);
+const LEGACY_RANK_IDS = new Set(["standard", "with-ai", "without-ai", "full", "legacy-owner"]);
 const DEFAULT_SETTINGS = {
   theme: "dark",
   accent: "#75cfff",
@@ -195,6 +191,32 @@ const requireEnvFile = await readFile(resolve(ROOT, ".env"), "utf8")
 
 function env(name, fallback) {
   return process.env[name] ?? requireEnvFile[name] ?? fallback;
+}
+
+function configuredPublicText(value, name, maximumLength = 1000) {
+  const text = String(value ?? "").trim();
+  if (text.length > maximumLength || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(text)) {
+    throw new Error(`${name} must be at most ${maximumLength} printable characters.`);
+  }
+  return text;
+}
+
+function configuredRoundcubeUrl(value, production) {
+  if (!value) return null;
+  try {
+    const parsed = new URL(value);
+    const localHttpHost = ["localhost", "127.0.0.1", "[::1]"].includes(parsed.hostname);
+    if (
+      parsed.username ||
+      parsed.password ||
+      parsed.search ||
+      parsed.hash ||
+      (parsed.protocol !== "https:" && !(parsed.protocol === "http:" && !production && localHttpHost))
+    ) throw new Error();
+    return parsed.href.replace(/\/+$/, "") || parsed.origin;
+  } catch {
+    throw new Error("ROUNDCUBE_URL must be an HTTPS URL (HTTP is allowed only for localhost during development), without credentials, query, or fragment.");
+  }
 }
 
 function safeJson(value, fallback) {
@@ -531,11 +553,11 @@ function createDatabase(path) {
     `);
   }
   const accountColumns = new Set(db.prepare("PRAGMA table_info(accounts)").all().map((column) => column.name));
-  if (!accountColumns.has("rank")) db.exec("ALTER TABLE accounts ADD COLUMN rank TEXT NOT NULL DEFAULT 'standard'");
+  if (!accountColumns.has("rank")) db.exec("ALTER TABLE accounts ADD COLUMN rank TEXT NOT NULL DEFAULT 'basic-plus'");
   if (!accountColumns.has("email")) db.exec("ALTER TABLE accounts ADD COLUMN email TEXT");
   if (!accountColumns.has("password_hash")) db.exec("ALTER TABLE accounts ADD COLUMN password_hash TEXT");
   const tokenColumns = new Set(db.prepare("PRAGMA table_info(tokens)").all().map((column) => column.name));
-  if (!tokenColumns.has("rank")) db.exec("ALTER TABLE tokens ADD COLUMN rank TEXT NOT NULL DEFAULT 'standard'");
+  if (!tokenColumns.has("rank")) db.exec("ALTER TABLE tokens ADD COLUMN rank TEXT NOT NULL DEFAULT 'basic-plus'");
   if (!tokenColumns.has("ai_usage_count")) db.exec("ALTER TABLE tokens ADD COLUMN ai_usage_count INTEGER NOT NULL DEFAULT 0");
   const friendColumns = new Set(db.prepare("PRAGMA table_info(accounts)").all().map((column) => column.name));
   if (!friendColumns.has("is_friend")) db.exec("ALTER TABLE accounts ADD COLUMN is_friend INTEGER NOT NULL DEFAULT 0");
@@ -547,10 +569,6 @@ function createDatabase(path) {
     db.prepare("INSERT INTO schema_migrations(version, applied_at) VALUES (3, CURRENT_TIMESTAMP)").run();
   }
   if (!db.prepare("SELECT version FROM schema_migrations WHERE version = 4").get()) {
-    const insertRank = db.prepare("INSERT OR IGNORE INTO ranks(id, label, permissions_json, features_json, created_at) VALUES (?, ?, ?, ?, ?)");
-    for (const rank of DEFAULT_RANKS.filter(({ id }) => id === "without-ai" || id === "with-ai")) {
-      insertRank.run(rank.id, rank.label, JSON.stringify(rank.permissions), JSON.stringify(rank.features), new Date().toISOString());
-    }
     db.prepare("INSERT INTO schema_migrations(version, applied_at) VALUES (4, CURRENT_TIMESTAMP)").run();
   }
   if (!db.prepare("SELECT version FROM schema_migrations WHERE version = 5").get()) {
@@ -681,6 +699,65 @@ function createDatabase(path) {
       INSERT INTO schema_migrations(version, applied_at) VALUES (12, CURRENT_TIMESTAMP);
       COMMIT;
     `);
+  }
+  if (!db.prepare("SELECT version FROM schema_migrations WHERE version = 13").get()) {
+    db.exec(`
+      BEGIN IMMEDIATE;
+      CREATE TABLE IF NOT EXISTS rank_upgrade_requests (
+        id TEXT PRIMARY KEY,
+        account_id TEXT NOT NULL REFERENCES accounts(id),
+        rank_id TEXT NOT NULL,
+        rank_label TEXT NOT NULL,
+        payment_method TEXT NOT NULL CHECK (payment_method IN ('visa_gift_card', 'cash')),
+        status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'in_review', 'resolved', 'declined')),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS rank_upgrade_requests_by_time ON rank_upgrade_requests(created_at DESC);
+      INSERT INTO schema_migrations(version, applied_at) VALUES (13, CURRENT_TIMESTAMP);
+      COMMIT;
+    `);
+  }
+  if (!db.prepare("SELECT version FROM schema_migrations WHERE version = 14").get()) {
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      const aliases = [
+        ["standard", "basic-plus"],
+        ["without-ai", "basic-plus"],
+        ["with-ai", "ai"],
+        ["full", "full-minus"],
+        ["legacy-owner", "full-minus"],
+      ];
+      const upsert = db.prepare(`INSERT INTO ranks(id, label, permissions_json, features_json, created_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET label = excluded.label,
+          permissions_json = excluded.permissions_json, features_json = excluded.features_json`);
+      for (const rank of DEFAULT_RANKS) {
+        upsert.run(rank.id, rank.label, JSON.stringify(rank.permissions), JSON.stringify(rank.features), new Date().toISOString());
+      }
+      const moveAccountRank = db.prepare("UPDATE accounts SET rank = ? WHERE rank = ?");
+      const moveTokenRank = db.prepare("UPDATE tokens SET rank = ? WHERE rank = ?");
+      const moveRequestRank = db.prepare("UPDATE rank_upgrade_requests SET rank_id = ?, rank_label = ? WHERE rank_id = ?");
+      const deleteLegacyRank = db.prepare("DELETE FROM ranks WHERE id = ?");
+      for (const [legacyId, currentId] of aliases) {
+        const current = DEFAULT_RANKS.find(({ id }) => id === currentId);
+        moveAccountRank.run(currentId, legacyId);
+        moveTokenRank.run(currentId, legacyId);
+        moveRequestRank.run(currentId, current.label, legacyId);
+        deleteLegacyRank.run(legacyId);
+      }
+      for (const rank of DEFAULT_RANKS) {
+        db.prepare("UPDATE accounts SET permissions_json = ?, features_json = ? WHERE rank = ?")
+          .run(JSON.stringify(rank.permissions), JSON.stringify(rank.features), rank.id);
+        db.prepare("UPDATE tokens SET permissions_json = ? WHERE rank = ?")
+          .run(JSON.stringify(rank.permissions), rank.id);
+      }
+      db.prepare("INSERT INTO schema_migrations(version, applied_at) VALUES (14, CURRENT_TIMESTAMP)").run();
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
   }
   return db;
 }
@@ -1092,6 +1169,30 @@ export async function createApp(options = {}) {
   const feedbackEmail = options.feedbackEmail ?? env("FEEDBACK_EMAIL", "");
   const emailFetch = options.emailFetch ?? globalThis.fetch;
   const emailConfigured = Boolean(emailApiKey && emailFrom && feedbackEmail);
+  const production = options.production ?? env("NODE_ENV", "development") === "production";
+  let roundcubeUrl;
+  let rankPrices;
+  let visaGiftCardInstructions;
+  let cashPaymentInstructions;
+  try {
+    roundcubeUrl = configuredRoundcubeUrl(options.roundcubeUrl ?? env("ROUNDCUBE_URL", ""), production);
+    rankPrices = Object.fromEntries(["basic-plus", "ai", "full-minus"].map((id) => {
+      const key = `RANK_PRICE_${id.toUpperCase().replaceAll("-", "_")}`;
+      const price = configuredPublicText(options.rankPrices?.[id] ?? env(key, ""), key, 80);
+      return [id, price || null];
+    }));
+    visaGiftCardInstructions = configuredPublicText(
+      options.visaGiftCardInstructions ?? env("RANK_VISA_GIFT_CARD_INSTRUCTIONS", ""),
+      "RANK_VISA_GIFT_CARD_INSTRUCTIONS",
+    );
+    cashPaymentInstructions = configuredPublicText(
+      options.cashPaymentInstructions ?? env("RANK_CASH_PAYMENT_INSTRUCTIONS", ""),
+      "RANK_CASH_PAYMENT_INSTRUCTIONS",
+    );
+  } catch (error) {
+    db.close();
+    throw error;
+  }
   async function notifyFeedback(subject, text) {
     if (!emailConfigured) return "not_configured";
     try {
@@ -1888,19 +1989,24 @@ export async function createApp(options = {}) {
     }
 
     if (method === "GET" && path === "/api/rank-store") {
-      const items = db.prepare("SELECT id, label, permissions_json, features_json FROM ranks WHERE id IN ('basic', 'full', 'standard', 'with-ai', 'without-ai') ORDER BY CASE id WHEN 'basic' THEN 0 WHEN 'standard' THEN 1 WHEN 'without-ai' THEN 2 WHEN 'with-ai' THEN 3 WHEN 'full' THEN 4 ELSE 5 END, label")
+      const items = db.prepare("SELECT id, label, permissions_json, features_json FROM ranks WHERE id IN ('basic', 'basic-plus', 'ai', 'full-minus', 'owner') ORDER BY CASE id WHEN 'basic' THEN 0 WHEN 'basic-plus' THEN 1 WHEN 'ai' THEN 2 WHEN 'full-minus' THEN 3 WHEN 'owner' THEN 4 ELSE 5 END")
         .all().map((row) => ({
           id: row.id,
           label: row.label,
           permissions: safeJson(row.permissions_json, []),
           features: safeJson(row.features_json, []),
-          price: row.id === "basic" ? 0 : null,
+          price: row.id === "basic" ? 0 : rankPrices[row.id] ?? null,
           available: row.id === "basic",
         }));
       sendJson(res, 200, {
         items,
         checkoutConfigured: false,
-        message: "Basic is free. Paid rank checkout is not configured; higher ranks remain available by owner-issued invitation.",
+        message: "Basic is free. Higher-rank payments are arranged and verified manually by the owner; no checkout or automatic upgrade is available.",
+        paymentInstructions: {
+          visaGiftCard: visaGiftCardInstructions || "Not configured. Submit a request and wait for the owner to confirm current price and safe payment instructions. Never send card numbers, PINs, CVVs, redemption codes, or card photos through Luma.",
+          cash: cashPaymentInstructions || "Not configured. Submit a request and wait for the owner to confirm the current price and a safe cash handoff location.",
+          manualReview: true,
+        },
       });
       return;
     }
@@ -1909,19 +2015,41 @@ export async function createApp(options = {}) {
       const user = requirePrincipal(session, "user");
       requireCsrf(req, user);
       const body = await readBody(req);
-      if (!["full", "standard", "with-ai", "without-ai"].includes(body.rank)) {
+      if (!body || typeof body !== "object" || Array.isArray(body) ||
+          Object.keys(body).sort().join(",") !== "paymentMethod,rank") {
+        throw new HttpError(400, "A rank request may contain only the rank and payment method. Do not send card details, codes, PINs, CVVs, or photos.");
+      }
+      if (!["basic-plus", "ai", "full-minus"].includes(body.rank)) {
         throw new HttpError(400, "Choose an upgrade rank from the store.");
+      }
+      if (!["visa_gift_card", "cash"].includes(body.paymentMethod)) {
+        throw new HttpError(400, "Choose Visa gift card or cash as the payment method.");
       }
       const rank = db.prepare("SELECT label FROM ranks WHERE id = ?").get(body.rank);
       if (!rank) throw new HttpError(404, "That rank is not available.", "rank_not_found");
       consumeLimit(`rank-request:${user.account_id}`, 3, 24 * 60 * 60_000);
       const id = randomUUID();
       const now = new Date().toISOString();
-      db.prepare("INSERT INTO feedback(id, account_id, kind, subject, message, created_at) VALUES (?, ?, 'suggestion', ?, ?, ?)")
-        .run(id, user.account_id, `Rank upgrade request: ${rank.label}`, `Account requested access to ${rank.label}. No payment was collected.`, now);
-      audit(db, user.account.label, "rank.upgrade_requested", id, { rank: body.rank }, ip);
-      await notifyFeedback(`Luma rank request: ${rank.label}`, `Account ${user.account.label} requested ${rank.label}. No payment was collected.`);
-      sendJson(res, 201, { requested: true, checkoutConfigured: false, message: "Request sent to the owner; no payment was collected." });
+      db.prepare(`INSERT INTO rank_upgrade_requests(id, account_id, rank_id, rank_label, payment_method, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)`)
+        .run(id, user.account_id, body.rank, rank.label, body.paymentMethod, now, now);
+      audit(db, user.account.label, "rank.upgrade_requested", id, { rank: body.rank, paymentMethod: body.paymentMethod }, ip);
+      const emailNotification = await notifyFeedback(
+        `Luma rank request: ${rank.label}`,
+        `Account ${user.account.label} requested ${rank.label} using ${body.paymentMethod === "cash" ? "cash" : "a Visa gift card"}. No payment was collected. Review the request in the owner console.`,
+      );
+      sendJson(res, 201, {
+        id,
+        requested: true,
+        checkoutConfigured: false,
+        emailNotification,
+        message: "Request sent for owner review. No payment was collected and your rank has not changed.",
+      });
+      return;
+    }
+
+    if (method === "GET" && path === "/api/workspace-config") {
+      sendJson(res, 200, { roundcubeUrl });
       return;
     }
 
@@ -1937,6 +2065,45 @@ export async function createApp(options = {}) {
           createdAt: row.created_at,
         }));
       sendJson(res, 200, { items });
+      return;
+    }
+
+    if (method === "GET" && path === "/api/admin/rank-requests") {
+      requireOwner(session);
+      const limit = Math.min(Number(url.searchParams.get("limit") ?? 100), 200);
+      if (!Number.isInteger(limit) || limit < 1) throw new HttpError(400, "Limit must be between 1 and 200.");
+      const items = db.prepare(`SELECT r.id, r.account_id, a.label AS account_label, r.rank_id, r.rank_label,
+        r.payment_method, r.status, r.created_at, r.updated_at
+        FROM rank_upgrade_requests r JOIN accounts a ON a.id = r.account_id
+        ORDER BY r.created_at DESC LIMIT ?`).all(limit).map((row) => ({
+        id: row.id,
+        accountId: row.account_id,
+        accountLabel: row.account_label,
+        rankId: row.rank_id,
+        rankLabel: row.rank_label,
+        paymentMethod: row.payment_method,
+        status: row.status,
+        createdAt: row.created_at,
+        updatedAt: row.updated_at,
+      }));
+      sendJson(res, 200, { items });
+      return;
+    }
+
+    const rankRequestStatusMatch = path.match(/^\/api\/admin\/rank-requests\/([0-9a-f-]{36})$/);
+    if (method === "PATCH" && rankRequestStatusMatch) {
+      const admin = requireOwner(session);
+      requireCsrf(req, admin);
+      const body = await readBody(req);
+      if (!["open", "in_review", "resolved", "declined"].includes(body.status)) {
+        throw new HttpError(400, "Choose open, in_review, resolved, or declined.");
+      }
+      const now = new Date().toISOString();
+      const result = db.prepare("UPDATE rank_upgrade_requests SET status = ?, updated_at = ? WHERE id = ?")
+        .run(body.status, now, rankRequestStatusMatch[1]);
+      if (!result.changes) throw new HttpError(404, "Rank request not found.", "not_found");
+      audit(db, "owner", "rank.upgrade_request_status_changed", rankRequestStatusMatch[1], { status: body.status }, ip);
+      sendJson(res, 200, { ok: true, status: body.status });
       return;
     }
 
@@ -3641,7 +3808,7 @@ quit
 Create options:
 --account-label "Guest"          Account label
 --account-id <uuid>              Add a replacement invitation to an existing account
---rank <rank-id>                 basic,full,standard,with-ai,without-ai or custom
+--rank <rank-id>                 basic,basic-plus,ai,full-minus,owner or custom
 --uses 1                         Every invitation is single-use
 --permissions <comma-list>       browse,bookmarks,history,settings,assistant,games,support
 --features <comma-list|none>     bookmarks,history,settings,assistant,games,support

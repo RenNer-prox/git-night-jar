@@ -1,6 +1,6 @@
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
-const state = { csrf: "", summary: null, siteControls: null, tokens: [], accounts: [], ranks: [], friends: [], sessions: [], audits: [], feedback: [], moderation: [], twoFactor: false, toastTimer: 0, desktopViewerWindow: null, desktopViewerHandshake: null };
+const state = { csrf: "", summary: null, siteControls: null, tokens: [], accounts: [], ranks: [], friends: [], sessions: [], audits: [], feedback: [], rankRequests: [], moderation: [], twoFactor: false, toastTimer: 0, desktopViewerWindow: null, desktopViewerHandshake: null };
 
 function esc(value = "") {
   return String(value).replace(/[&<>"']/g, (char) => ({
@@ -159,7 +159,7 @@ function renderRanks() {
     root.innerHTML = '<div class="table-empty">No access ranks are configured. Add a rank before creating an invitation.</div>';
     return;
   }
-  root.innerHTML = `<div class="rank-grid">${state.ranks.map((rank) => `<article class="rank-card"><div class="rank-heading"><strong>${esc(rank.label)}</strong>${["basic", "basic-plus", "ai", "full-minus", "owner", "standard", "with-ai", "without-ai", "full"].includes(rank.id) ? '<span class="status-badge active">built in</span>' : `<button class="danger-button" type="button" data-delete-rank="${esc(rank.id)}" aria-label="Remove ${esc(rank.label)} rank">Remove</button>`}</div><div class="rank-id mono">${esc(rank.id)}</div><div class="token-permissions">${rank.features.includes("assistant") ? `<span>${["basic", "basic-plus"].includes(rank.id) ? "AI · 20 requests per token" : "Unlimited AI"}</span>` : "<span>AI disabled</span>"}${rank.permissions.map((item) => `<span>${esc(item)}</span>`).join("")}</div><div class="table-secondary">Features: ${esc(rank.features.join(", ") || "none")}</div></article>`).join("")}</div>`;
+  root.innerHTML = `<div class="rank-grid">${state.ranks.map((rank) => `<article class="rank-card"><div class="rank-heading"><strong>${esc(rank.label)}</strong>${["basic", "basic-plus", "ai", "full-minus", "owner"].includes(rank.id) ? '<span class="status-badge active">built in</span>' : `<button class="danger-button" type="button" data-delete-rank="${esc(rank.id)}" aria-label="Remove ${esc(rank.label)} rank">Remove</button>`}</div><div class="rank-id mono">${esc(rank.id)}</div><div class="token-permissions">${rank.features.includes("assistant") ? `<span>${["basic", "basic-plus"].includes(rank.id) ? "AI · 20 requests per token" : "Unlimited AI"}</span>` : "<span>AI disabled</span>"}${rank.permissions.map((item) => `<span>${esc(item)}</span>`).join("")}</div><div class="table-secondary">Features: ${esc(rank.features.join(", ") || "none")}</div></article>`).join("")}</div>`;
   $$("[data-delete-rank]").forEach((button) => button.addEventListener("click", () => void deleteRank(button.dataset.deleteRank)));
 }
 
@@ -284,6 +284,28 @@ function renderFeedback() {
       toast("Feedback status updated.");
     } catch (error) { toast(error.message); }
   }));
+}
+
+function renderRankRequests() {
+  const root = $("#rank-request-table");
+  if (!state.rankRequests.length) {
+    root.innerHTML = '<div class="table-empty">No rank-up requests have been submitted.</div>';
+    return;
+  }
+  root.innerHTML = `<div class="feedback-list">${state.rankRequests.map((item) => `<article class="feedback-card"><header><div><span class="status-badge ${esc(item.status)}">${esc(item.status.replaceAll("_", " "))}</span><h3>${esc(item.rankLabel)}</h3><p>${esc(item.accountLabel)} · ${esc(item.paymentMethod === "visa_gift_card" ? "Visa gift card" : "Cash")} · ${esc(date(item.createdAt))}</p></div><label class="feedback-status">Status<select data-rank-request-status="${esc(item.id)}" aria-label="Update rank request for ${esc(item.accountLabel)}"><option value="open" ${item.status === "open" ? "selected" : ""}>Open</option><option value="in_review" ${item.status === "in_review" ? "selected" : ""}>In review</option><option value="resolved" ${item.status === "resolved" ? "selected" : ""}>Resolved</option><option value="declined" ${item.status === "declined" ? "selected" : ""}>Declined</option></select></label></header><p class="feedback-message">Requested rank: ${esc(item.rankLabel)}. Confirm price and payment directly with the account holder. Mark resolved only after verifying payment and manually updating the account; status changes do not grant access.</p></article>`).join("")}</div>`;
+  $$("[data-rank-request-status]").forEach((select) => select.addEventListener("change", async () => {
+    try {
+      await api(`/api/admin/rank-requests/${select.dataset.rankRequestStatus}`, { method: "PATCH", body: { status: select.value } });
+      await loadRankRequests();
+      toast("Rank request status updated; account access is unchanged.");
+    } catch (error) { toast(error.message); }
+  }));
+}
+
+async function loadRankRequests() {
+  const result = await api("/api/admin/rank-requests?limit=200");
+  state.rankRequests = result.items;
+  renderRankRequests();
 }
 
 function renderModeration() {
@@ -654,6 +676,7 @@ function setPanel(name) {
   if (name === "friends") void Promise.all([loadTokens(), loadFriends()]).catch((error) => toast(error.message));
   if (name === "site-controls") void loadSiteControls().catch((error) => toast(error.message));
   if (name === "sessions") void loadSessions().catch((error) => toast(error.message));
+  if (name === "rank-requests") void loadRankRequests().catch((error) => toast(error.message));
   if (name === "support") void loadFeedback().catch((error) => toast(error.message));
   if (name === "moderation") void loadModeration().catch((error) => toast(error.message));
   if (name === "audit") void api("/api/admin/audit?limit=100").then((result) => { state.audits = result.items; renderAudit(); }).catch((error) => toast(error.message));
@@ -953,6 +976,7 @@ $("#refresh-tokens").addEventListener("click", () => void loadTokens().catch((er
 $("#refresh-accounts").addEventListener("click", () => void loadTokens().catch((error) => toast(error.message)));
 $("#refresh-friends").addEventListener("click", () => void loadFriends().catch((error) => toast(error.message)));
 $("#refresh-sessions").addEventListener("click", () => void loadSessions().catch((error) => toast(error.message)));
+$("#refresh-rank-requests").addEventListener("click", () => void loadRankRequests().catch((error) => toast(error.message)));
 $("#refresh-feedback").addEventListener("click", () => void loadFeedback().catch((error) => toast(error.message)));
 $("#refresh-moderation").addEventListener("click", () => void loadModeration().catch((error) => toast(error.message)));
 $("#refresh-audit").addEventListener("click", () => void api("/api/admin/audit?limit=100").then((result) => { state.audits = result.items; renderAudit(); }).catch((error) => toast(error.message)));

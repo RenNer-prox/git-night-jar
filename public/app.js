@@ -589,9 +589,16 @@ function applyAccountFeatures() {
   $("#notes-open").hidden = !permits("notes");
   $("#storage-open").hidden = !permits("storage");
   $("#chat-open").hidden = !permits("chat");
+  $("#email-open").hidden = state.guest;
   $("#rank-store-open").hidden = state.guest;
   $("#bugs-open").hidden = state.guest;
   $("#project-areas-card").hidden = state.guest;
+  $("#project-open-proxy").hidden = state.guest;
+  $("#project-open-games").hidden = !permits("games");
+  $("#project-open-assistant").hidden = !permits("assistant");
+  $("#project-open-bookmarks").hidden = !permits("bookmarks");
+  $("#project-open-history").hidden = !permits("history");
+  $("#project-open-help").hidden = state.guest;
   $("#signout").hidden = state.guest;
 }
 
@@ -725,70 +732,89 @@ function renderQuickLinks() {
     button.addEventListener("click", () => void navigate(item.url));
     root.append(button);
   }
+}
 
-  function renderProjectAreas() {
-    const root = $("#project-area-list");
-    if (!state.projectAreas.length) {
-      root.innerHTML = '<p class="project-area-empty">No project areas yet. Add one for your Proxy, games, or another project.</p>';
-      return;
-    }
-    root.innerHTML = state.projectAreas.map((area) => `<article class="project-area-item"><div class="project-area-icon">${area.kind === "games" ? svg("games", 16) : svg("external", 16)}</div><div class="project-area-copy"><strong>${escapeHtml(area.label)}</strong><span>${escapeHtml(area.kind)} · private to your account</span></div><div class="project-area-actions"><button class="text-button" type="button" data-edit-project-area="${area.id}">Rename</button><button class="text-button danger-text" type="button" data-delete-project-area="${area.id}">Remove</button></div></article>`).join("");
-    $$("[data-edit-project-area]", root).forEach((button) => button.addEventListener("click", () => {
-      const area = state.projectAreas.find((item) => item.id === button.dataset.editProjectArea);
-      if (area) openProjectAreaDialog(area);
-    }));
-    $$("[data-delete-project-area]", root).forEach((button) => button.addEventListener("click", () => void deleteProjectArea(button.dataset.deleteProjectArea)));
+function renderProjectAreas() {
+  const root = $("#project-area-list");
+  if (!state.projectAreas.length) {
+    root.innerHTML = '<p class="project-area-empty">No project areas yet. Add one for your Proxy, games, or another project.</p>';
+    return;
   }
+  root.innerHTML = state.projectAreas.map((area) => `<article class="project-area-item"><div class="project-area-icon">${area.kind === "games" ? svg("games", 16) : svg("external", 16)}</div><div class="project-area-copy"><strong>${escapeHtml(area.label)}</strong><span>${area.kind === "proxy" ? "Open the private web proxy" : area.kind === "games" ? "Open games inside the proxy" : "Private project · open in proxy"}</span></div><div class="project-area-actions"><button class="secondary-button" type="button" data-open-project-area="${area.id}">${area.kind === "games" ? "Open games" : "Open in proxy"}</button><button class="text-button" type="button" data-edit-project-area="${area.id}">Rename</button><button class="text-button danger-text" type="button" data-delete-project-area="${area.id}">Remove</button></div></article>`).join("");
+  $$("[data-open-project-area]", root).forEach((button) => button.addEventListener("click", () => {
+    const area = state.projectAreas.find((item) => item.id === button.dataset.openProjectArea);
+    if (area) openProjectArea(area);
+  }));
+  $$("[data-edit-project-area]", root).forEach((button) => button.addEventListener("click", () => {
+    const area = state.projectAreas.find((item) => item.id === button.dataset.editProjectArea);
+    if (area) openProjectAreaDialog(area);
+  }));
+  $$("[data-delete-project-area]", root).forEach((button) => button.addEventListener("click", () => void deleteProjectArea(button.dataset.deleteProjectArea)));
+}
 
-  async function loadProjectAreas() {
+function openProjectArea(area) {
+  if (area.kind === "games") {
+    const tab = createTab(true);
+    void navigate("https://gn-math.dev", { tab });
+    return;
+  }
+  const tab = createTab(true);
+  showHome();
+  if (area.kind === "custom") {
+    $("#address").focus();
+    toast("Enter a web address to open it through the private proxy.");
+  }
+  return tab;
+}
+
+async function loadProjectAreas() {
+  try {
+    const result = await api("/api/project-areas");
+    state.projectAreas = result.items;
+    renderProjectAreas();
+  } catch (error) {
+    $("#project-area-list").innerHTML = `<p class="project-area-empty">${escapeHtml(error.message)}</p>`;
+  }
+}
+
+function openProjectAreaDialog(area = null) {
+  const name = area?.name ?? "Proxy";
+  openDialog({
+    title: area ? "Edit project area" : "Add project area",
+    subtitle: "Only you can view and manage areas belonging to your account.",
+    content: `<form id="project-area-form" class="settings-grid"><label class="form-field"><span class="field-label">Area type</span><select class="field-select" name="kind"><option value="proxy">Proxy</option><option value="games">Games</option><option value="custom">Custom project</option></select></label><label class="form-field"><span class="field-label">Project name</span><input class="field-input" name="name" maxlength="50" required value="${escapeHtml(name)}"></label></form>`,
+    footer: `<span class="muted" style="font-size:9px">Displayed as ${escapeHtml(state.account.label)}'s [project name].</span><div class="dialog-footer-right"><button class="secondary-button" data-close-dialog type="button">Cancel</button><button id="save-project-area" class="primary-button" type="button">Save area</button></div>`,
+  });
+  const form = $("#project-area-form");
+  form.elements.kind.value = area?.kind ?? "proxy";
+  form.elements.kind.addEventListener("change", () => {
+    if (!area || ["Proxy", "games"].includes(form.elements.name.value)) {
+      form.elements.name.value = form.elements.kind.value === "proxy" ? "Proxy" : form.elements.kind.value === "games" ? "games" : "";
+    }
+  });
+  $("[data-close-dialog]").addEventListener("click", closeDialog);
+  $("#save-project-area").addEventListener("click", async () => {
+    if (!form.reportValidity()) return;
     try {
-      const result = await api("/api/project-areas");
-      state.projectAreas = result.items;
-      renderProjectAreas();
-    } catch (error) {
-      $("#project-area-list").innerHTML = `<p class="project-area-empty">${escapeHtml(error.message)}</p>`;
-    }
-  }
-
-  function openProjectAreaDialog(area = null) {
-    const name = area?.name ?? "Proxy";
-    openDialog({
-      title: area ? "Edit project area" : "Add project area",
-      subtitle: "Only you can view and manage areas belonging to your account.",
-      content: `<form id="project-area-form" class="settings-grid"><label class="form-field"><span class="field-label">Area type</span><select class="field-select" name="kind"><option value="proxy">Proxy</option><option value="games">Games</option><option value="custom">Custom project</option></select></label><label class="form-field"><span class="field-label">Project name</span><input class="field-input" name="name" maxlength="50" required value="${escapeHtml(name)}"></label></form>`,
-      footer: `<span class="muted" style="font-size:9px">Displayed as ${escapeHtml(state.account.label)}'s [project name].</span><div class="dialog-footer-right"><button class="secondary-button" data-close-dialog type="button">Cancel</button><button id="save-project-area" class="primary-button" type="button">Save area</button></div>`,
-    });
-    const form = $("#project-area-form");
-    form.elements.kind.value = area?.kind ?? "proxy";
-    form.elements.kind.addEventListener("change", () => {
-      if (!area || ["Proxy", "games"].includes(form.elements.name.value)) {
-        form.elements.name.value = form.elements.kind.value === "proxy" ? "Proxy" : form.elements.kind.value === "games" ? "games" : "";
-      }
-    });
-    $("[data-close-dialog]").addEventListener("click", closeDialog);
-    $("#save-project-area").addEventListener("click", async () => {
-      if (!form.reportValidity()) return;
       const body = { kind: form.elements.kind.value, name: form.elements.name.value.trim() };
-      try {
-        await api(area ? `/api/project-areas/${area.id}` : "/api/project-areas", {
-          method: area ? "PATCH" : "POST",
-          body,
-        });
-        closeDialog();
-        await loadProjectAreas();
-        toast(area ? "Project area updated." : "Project area created.");
-      } catch (error) { toast(error.message); }
-    });
-  }
-
-  async function deleteProjectArea(id) {
-    if (!confirm("Remove this private project area?")) return;
-    try {
-      await api(`/api/project-areas/${id}`, { method: "DELETE" });
+      await api(area ? `/api/project-areas/${area.id}` : "/api/project-areas", {
+        method: area ? "PATCH" : "POST",
+        body,
+      });
+      closeDialog();
       await loadProjectAreas();
-      toast("Project area removed.");
+      toast(area ? "Project area updated." : "Project area created.");
     } catch (error) { toast(error.message); }
-  }
+  });
+}
+
+async function deleteProjectArea(id) {
+  if (!confirm("Remove this private project area?")) return;
+  try {
+    await api(`/api/project-areas/${id}`, { method: "DELETE" });
+    await loadProjectAreas();
+    toast("Project area removed.");
+  } catch (error) { toast(error.message); }
 }
 
 async function refreshCapabilities() {
@@ -1240,13 +1266,19 @@ function openFeedback(kind) {
     const button = $("#send-feedback");
     button.disabled = true;
     try {
-      await api("/api/feedback", { method: "POST", body: {
+      const result = await api("/api/feedback", { method: "POST", body: {
         kind,
         subject: form.elements.subject.value.trim(),
         message: form.elements.message.value.trim(),
       } });
       closeDialog();
-      toast(suggestion ? "Suggestion sent privately." : bug ? "Bug report sent privately." : "Support request sent privately.");
+      const saved = suggestion ? "Suggestion saved privately." : bug ? "Bug report saved privately." : "Support request saved privately.";
+      const emailStatus = result.emailNotification === "sent"
+        ? " The owner was also emailed."
+        : result.emailNotification === "failed"
+          ? " The request is in the owner console, but the email notification failed."
+          : " Owner email notifications are not configured; the request is in the owner console.";
+      toast(`${saved}${emailStatus}`);
     } catch (error) {
       toast(error.message);
       button.disabled = false;
@@ -1402,22 +1434,69 @@ async function openChatThread(peer) {
 async function openRankStore() {
   try {
     const result = await api("/api/rank-store");
-    const items = result.items.map((rank) => `<article class="rank-store-card"><h3>${escapeHtml(rank.label)}</h3><p>${rank.id === "basic" ? "Free" : "Invite-only"}</p><div class="token-permissions">${rank.features.map((feature) => `<span>${escapeHtml(feature)}</span>`).join("")}</div>${rank.id === "basic" ? '<span class="status-badge active">Available</span>' : `<button class="secondary-button" type="button" data-rank-request="${escapeHtml(rank.id)}">Request upgrade</button>`}</article>`).join("");
+    const items = result.items.map((rank) => `<article class="rank-store-card"><h3>${escapeHtml(rank.label)}</h3><p>${rank.id === "basic" ? "Free" : rank.price ? `Price: ${escapeHtml(rank.price)}` : rank.id === "owner" ? "Administrator access" : "Price: ask owner"}</p><div class="token-permissions">${rank.features.map((feature) => `<span>${escapeHtml(feature)}</span>`).join("")}</div>${rank.id === "basic" ? '<span class="status-badge active">Available</span>' : rank.id === "owner" ? '<span class="status-badge">Not available for purchase</span>' : `<button class="secondary-button" type="button" data-rank-request="${escapeHtml(rank.id)}">Request upgrade</button>`}</article>`).join("");
+    const visaInstructions = escapeHtml(result.paymentInstructions.visaGiftCard);
+    const cashInstructions = escapeHtml(result.paymentInstructions.cash);
     openDialog({
       title: "Rank store",
       subtitle: result.message,
       wide: true,
-      content: `<div class="rank-store-grid">${items}</div><p class="table-secondary">There is no payment processor configured. Upgrade requests go privately to the owner; no payment is taken.</p>`,
+      content: `<div class="rank-store-grid">${items}</div><section class="rank-payment-guide"><h3>How manual rank payment works</h3><ol><li>Choose an upgrade and submit a request with <strong>Visa gift card</strong> or <strong>cash</strong>.</li><li>Wait for the owner to confirm the actual price and payment instructions before paying.</li><li>The owner checks payment independently and grants access manually. Submitting or resolving a request does not change your rank.</li></ol><h4>Visa gift card</h4><p>${visaInstructions}</p><p class="payment-warning">Never enter or send card numbers, PINs, CVVs, redemption codes, or card photos in Luma. The request form does not accept payment credentials.</p><h4>Cash</h4><p>${cashInstructions}</p><p class="table-secondary">Luma does not process or collect payments. No prices or payment location are assumed when the owner has not configured them.</p></section>`,
       footer: '<button class="secondary-button" data-close-dialog type="button">Done</button>',
     });
     $("[data-close-dialog]").addEventListener("click", closeDialog);
-    $$("[data-rank-request]").forEach((button) => button.addEventListener("click", async () => {
-      try {
-        const requested = await api("/api/rank-store/request", { method: "POST", body: { rank: button.dataset.rankRequest } });
-        toast(requested.message);
-        closeDialog();
-      } catch (error) { toast(error.message); }
+    $$("[data-rank-request]").forEach((button) => button.addEventListener("click", () => {
+      const rank = result.items.find((item) => item.id === button.dataset.rankRequest);
+      if (rank) openRankRequest(rank);
     }));
+  } catch (error) { toast(error.message); }
+}
+
+function openRankRequest(rank) {
+  openDialog({
+    title: `Request ${rank.label}`,
+    subtitle: "The owner will review your request and confirm the price and payment arrangements.",
+    content: `<form id="rank-request-form" class="stack-form"><label for="rank-payment-method">Payment method</label><select id="rank-payment-method" name="paymentMethod" required><option value="">Choose a method</option><option value="visa_gift_card">Visa gift card</option><option value="cash">Cash</option></select><p class="payment-warning">This request sends only the rank and payment method. Do not provide card numbers, PINs, CVVs, redemption codes, notes, or photos.</p></form>`,
+    footer: '<button class="secondary-button" data-close-dialog type="button">Cancel</button><button id="submit-rank-request" class="primary-button" type="button">Send for owner review</button>',
+  });
+  $("[data-close-dialog]").addEventListener("click", closeDialog);
+  $("#submit-rank-request").addEventListener("click", async () => {
+    const form = $("#rank-request-form");
+    if (!form.reportValidity()) return;
+    const button = $("#submit-rank-request");
+    button.disabled = true;
+    try {
+      const requested = await api("/api/rank-store/request", {
+        method: "POST",
+        body: { rank: rank.id, paymentMethod: form.elements.paymentMethod.value },
+      });
+      closeDialog();
+      const emailStatus = requested.emailNotification === "sent"
+        ? " The owner was also emailed."
+        : requested.emailNotification === "failed"
+          ? " The request is in the owner console, but the email notification failed."
+          : " Owner email notifications are not configured; the request is in the owner console.";
+      toast(`${requested.message}${emailStatus}`);
+    } catch (error) {
+      toast(error.message);
+      button.disabled = false;
+    }
+  });
+}
+
+async function openRoundcube() {
+  try {
+    const { roundcubeUrl } = await api("/api/workspace-config");
+    const access = roundcubeUrl
+      ? `<a class="primary-button" href="${escapeHtml(roundcubeUrl)}" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">Open Roundcube <span aria-hidden="true">↗</span></a>`
+      : '<p class="muted">Roundcube is not configured for this Luma instance. The owner needs to set <code>ROUNDCUBE_URL</code> to the secure webmail address.</p>';
+    openDialog({
+      title: "Email with Roundcube",
+      subtitle: "Roundcube is the webmail service configured by this Luma instance.",
+      content: `<div class="roundcube-access">${access}<p>Your mailbox and sign-in are managed by the Roundcube mail service. Luma does not see or store your mailbox password or email contents. App notifications are separate and require server-side Resend configuration.</p></div>`,
+      footer: '<button class="secondary-button" data-close-dialog type="button">Done</button>',
+    });
+    $("[data-close-dialog]").addEventListener("click", closeDialog);
   } catch (error) { toast(error.message); }
 }
 
@@ -1825,9 +1904,23 @@ $("#settings-open").addEventListener("click", openSettings);
 $("#theme-toggle").addEventListener("click", () => void cycleTheme());
 $("#help-open").addEventListener("click", openHelp);
 $("#games-open").addEventListener("click", openMathGame);
+$("#project-open-proxy").addEventListener("click", () => {
+  createTab(true);
+  showHome();
+  $("#address").focus();
+});
+$("#project-open-games").addEventListener("click", () => {
+  const tab = createTab(true);
+  void navigate("https://gn-math.dev", { tab });
+});
+$("#project-open-assistant").addEventListener("click", openAssistant);
+$("#project-open-bookmarks").addEventListener("click", () => void openBookmarks());
+$("#project-open-history").addEventListener("click", () => void openHistory());
+$("#project-open-help").addEventListener("click", openHelp);
 $("#notes-open").addEventListener("click", () => void openNotes());
 $("#storage-open").addEventListener("click", () => void openStorage());
 $("#chat-open").addEventListener("click", () => void openChat());
+$("#email-open").addEventListener("click", () => void openRoundcube());
 $("#rank-store-open").addEventListener("click", () => void openRankStore());
 $("#project-area-create").addEventListener("click", () => openProjectAreaDialog());
 $("#signout").addEventListener("click", () => {
