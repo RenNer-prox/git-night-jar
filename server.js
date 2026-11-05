@@ -2593,6 +2593,13 @@ export async function createApp(options = {}) {
     }
   }
 
+  function applyCorsOrigin(req, res) {
+    res.setHeader("Vary", "Origin");
+    if (configuredAppOrigin && req.headers.origin === configuredAppOrigin) {
+      res.setHeader("Access-Control-Allow-Origin", configuredAppOrigin);
+    }
+  }
+
   async function route(req, res) {
     const start = Date.now();
     const url = new URL(req.url, "http://nightjar.local");
@@ -2600,7 +2607,7 @@ export async function createApp(options = {}) {
       if (url.pathname === "/api/shuffleDict" || (url.pathname !== "/games-player.html" && isRammerheadRequest(url))) {
         await routeProxy(req, res);
       } else if (url.pathname.startsWith("/api/")) {
-        res.setHeader("Access-Control-Allow-Origin", "*");
+        applyCorsOrigin(req, res);
         res.setHeader("Access-Control-Allow-Methods", "GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS");
         res.setHeader("Access-Control-Allow-Headers", "Authorization, Content-Type, X-NJ-CSRF");
         res.setHeader("Access-Control-Max-Age", "600");
@@ -2623,7 +2630,7 @@ export async function createApp(options = {}) {
         const data = await readFile(filePath);
         const isHtml = extname(filePath) === ".html";
         securityHeaders(res, isHtml, pathname === "/admin" || pathname === "/admin.html", req);
-        res.setHeader("Access-Control-Allow-Origin", "*");
+        applyCorsOrigin(req, res);
         res.setHeader("Content-Type", MIME_TYPES[extname(filePath)] ?? "application/octet-stream");
         res.setHeader("Cache-Control", extname(filePath) === ".html" || ["/app.js", "/admin.js"].includes(pathname)
           ? "no-store"

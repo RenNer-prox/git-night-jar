@@ -142,7 +142,12 @@ test("serves the browser and keeps administrator routes isolated", async () => {
   const pageHtml = await page.text();
   assert.match(pageHtml, /id="theme-toggle"/);
   assert.match(pageHtml, /allow="autoplay; encrypted-media; fullscreen; picture-in-picture;/);
-  assert.equal((await fetch(`${baseUrl}/app.js`)).headers.get("access-control-allow-origin"), "*");
+  const crossOriginAsset = await fetch(`${baseUrl}/app.js`, {
+    headers: { Origin: "https://configured-ui.example" },
+  });
+  assert.equal(crossOriginAsset.headers.get("access-control-allow-origin"), "https://configured-ui.example");
+  assert.match(crossOriginAsset.headers.get("vary"), /Origin/i);
+  assert.equal((await fetch(`${baseUrl}/app.js`)).headers.get("access-control-allow-origin"), null);
   assert.match(pageHtml, /id="help-open"/);
   assert.match(pageHtml, /id="home-games"/);
   assert.match(pageHtml, /id="home-social"/);
@@ -772,17 +777,20 @@ test("owner can manage ranks and review private support requests", async () => {
 });
 
 test("Owner rank is server-authorized and the token dashboard never exposes secrets", async () => {
-  const unauthorized = await request("/api/owner/dashboard/tokens", { origin: "https://dashboard.example" });
+  const allowedOrigin = "https://configured-ui.example";
+  const unauthorized = await request("/api/owner/dashboard/tokens", { origin: allowedOrigin });
   assert.equal(unauthorized.response.status, 401);
-  assert.equal(unauthorized.response.headers.get("access-control-allow-origin"), "*");
-  assert.equal((await request("/api/owner/dashboard/tokens", { origin: "https://untrusted.example" })).response.status, 401);
+  assert.equal(unauthorized.response.headers.get("access-control-allow-origin"), allowedOrigin);
+  const untrusted = await request("/api/owner/dashboard/tokens", { origin: "https://untrusted.example" });
+  assert.equal(untrusted.response.status, 401);
+  assert.equal(untrusted.response.headers.get("access-control-allow-origin"), null);
 
   const invitation = await issueToken({ label: "Dashboard reader", rank: "basic-plus" });
   const regularLogin = await signIn(invitation.token);
   const regularCookie = cookieFrom(regularLogin.response, "nj_session");
   assert.equal((await request("/api/admin/me", { cookie: regularCookie })).response.status, 403);
   assert.equal((await request("/api/owner/dashboard/tokens", {
-    cookie: regularCookie, origin: "https://dashboard.example",
+    cookie: regularCookie, origin: allowedOrigin,
   })).response.status, 403);
 
   const ownerInvite = await issueToken({ label: "Owner dashboard", rank: "owner" });
@@ -790,11 +798,12 @@ test("Owner rank is server-authorized and the token dashboard never exposes secr
   const ownerCookie = cookieFrom(ownerLogin.response, "nj_session");
   assert.equal((await request("/api/admin/me", { cookie: ownerCookie })).response.status, 200);
   const dashboard = await request("/api/owner/dashboard/tokens", {
-    cookie: ownerCookie, origin: "https://dashboard.example",
+    cookie: ownerCookie, origin: allowedOrigin,
   });
   assert.equal(dashboard.response.status, 200, JSON.stringify(dashboard.data));
-  assert.equal(dashboard.response.headers.get("access-control-allow-origin"), "*");
+  assert.equal(dashboard.response.headers.get("access-control-allow-origin"), allowedOrigin);
   assert.equal(dashboard.response.headers.get("access-control-allow-credentials"), null);
+  assert.match(dashboard.response.headers.get("vary"), /Origin/i);
   assert.equal(dashboard.data.summary.total, dashboard.data.tokens.length);
   const item = dashboard.data.tokens.find((token) => token.id === invitation.item.id);
   assert.deepEqual(Object.keys(item).sort(), [
@@ -811,38 +820,50 @@ test("Owner rank is server-authorized and the token dashboard never exposes secr
   const preflight = await fetch(`${baseUrl}/api/owner/dashboard/tokens`, {
     method: "OPTIONS",
     headers: {
-      Origin: "https://dashboard.example",
+      Origin: allowedOrigin,
       "Access-Control-Request-Method": "GET",
       "Access-Control-Request-Headers": "authorization, content-type, x-nj-csrf",
     },
   });
   assert.equal(preflight.status, 204);
   assert.match(preflight.headers.get("access-control-allow-methods"), /DELETE/);
-  assert.equal(preflight.headers.get("access-control-allow-origin"), "*");
+  assert.equal(preflight.headers.get("access-control-allow-origin"), allowedOrigin);
   assert.match(preflight.headers.get("access-control-allow-headers"), /Authorization/i);
   assert.equal(preflight.headers.get("access-control-allow-credentials"), null);
+  assert.match(preflight.headers.get("vary"), /Origin/i);
+
+  const rejectedPreflight = await fetch(`${baseUrl}/api/owner/dashboard/tokens`, {
+    method: "OPTIONS",
+    headers: {
+      Origin: "https://untrusted.example",
+      "Access-Control-Request-Method": "GET",
+      "Access-Control-Request-Headers": "authorization",
+    },
+  });
+  assert.equal(rejectedPreflight.status, 204);
+  assert.equal(rejectedPreflight.headers.get("access-control-allow-origin"), null);
 });
 
 test("API-mode bearer sessions work cross-origin without cookies and can be revoked", async () => {
-  const origin = "https://static-ui.example";
+  const origin = "https://configured-ui.example";
   const invitation = await issueToken({ label: "API-mode user", rank: "basic-plus" });
   const login = await signIn(invitation.token, { origin, apiMode: true });
   assert.equal(login.response.status, 200, JSON.stringify(login.data));
-  assert.equal(login.response.headers.get("access-control-allow-origin"), "*");
+  assert.equal(login.response.headers.get("access-control-allow-origin"), origin);
   assert.equal(login.response.headers.get("set-cookie"), null);
   assert.match(login.data.sessionToken, /^[A-Za-z0-9_-]{43}$/);
   const authorization = `Bearer ${login.data.sessionToken}`;
 
   const session = await request("/api/session", { authorization, origin });
   assert.equal(session.response.status, 200, JSON.stringify(session.data));
-  assert.equal(session.response.headers.get("access-control-allow-origin"), "*");
+  assert.equal(session.response.headers.get("access-control-allow-origin"), origin);
   assert.equal(session.data.account.label, "API-mode user");
   assert.equal(session.response.headers.get("set-cookie"), null);
   const grant = await request("/api/browser/grant", {
     method: "POST", origin, authorization, csrf: session.data.csrf, body: {},
   });
   assert.equal(grant.response.status, 200, JSON.stringify(grant.data));
-  assert.equal(grant.response.headers.get("access-control-allow-origin"), "*");
+  assert.equal(grant.response.headers.get("access-control-allow-origin"), origin);
   assert.equal(grant.data.proxyOrigin, grant.data.gameOrigin);
 
   const logout = await request("/api/auth/logout", {
@@ -854,7 +875,7 @@ test("API-mode bearer sessions work cross-origin without cookies and can be revo
 });
 
 test("API-mode administrator bearer sessions support owner-console operations and logout", async () => {
-  const origin = "https://static-ui.example";
+  const origin = "https://configured-ui.example";
   const login = await request("/api/admin/login", {
     method: "POST", origin, body: { password, apiMode: true },
   });
@@ -865,7 +886,7 @@ test("API-mode administrator bearer sessions support owner-console operations an
   assert.equal(me.response.status, 200, JSON.stringify(me.data));
   const dashboard = await request("/api/owner/dashboard/tokens", { authorization, origin });
   assert.equal(dashboard.response.status, 200, JSON.stringify(dashboard.data));
-  assert.equal(dashboard.response.headers.get("access-control-allow-origin"), "*");
+  assert.equal(dashboard.response.headers.get("access-control-allow-origin"), origin);
   const logout = await request("/api/admin/logout", {
     method: "POST", authorization, origin, csrf: me.data.csrf, body: {},
   });

@@ -93,7 +93,7 @@ Create custom ranks with `ranks create "Study group" --permissions browse,games,
 |---|---|---|
 | `HOST` | `127.0.0.1` | Nightjar app bind address. Keep local unless using a properly secured HTTPS deployment. |
 | `PORT` | `4173` | Nightjar app port. |
-| `APP_ORIGIN` | inferred for local development | Exact public Nightjar origin allowed to embed the proxy shell and game player. Required in production. |
+| `APP_ORIGIN` | inferred for local development | Exact public browser UI origin allowed to embed the proxy shell/game player and make cross-origin API or static-asset requests. Required in production. |
 | `NODE_ENV` | `development` | Set to `production` behind HTTPS; production cookies use `Secure`. |
 | `DATABASE_PATH` | `./data/nightjar.sqlite` | SQLite database path. |
 | `ADMIN_INITIAL_PASSWORD` | unset | Required to initialize a new owner database; minimum 16 characters. |
@@ -112,9 +112,9 @@ For a Cloudflare Tunnel on the same host, use one ingress rule from the Nightjar
 
 ### Separate-domain API UI
 
-The `api-html` directory contains static copies of the browser and owner-console pages. Host those HTML files on a separate HTTPS site; their API-base meta tag and asset URLs are currently set to `https://p-tunnel-encrypted3.bearstool.com/`. Change those values in both HTML files when using another API host. The JavaScript and CSS are served from the API host, which permits wildcard CORS for static assets and API responses.
+The `api-html` directory contains static copies of the browser and owner-console pages. Host those HTML files on a separate HTTPS site; their API-base meta tag and asset URLs are currently set to `https://p-tunnel-encrypted3.bearstool.com/`. Change those values in both HTML files when using another API host, and set `APP_ORIGIN` to the exact origin serving those HTML files. Nightjar allows cross-origin API and static-asset access only from that configured origin; other origins receive no `Access-Control-Allow-Origin` header.
 
-API-mode pages use non-cookie bearer sessions because wildcard CORS cannot be combined with credentialed cookies. The browser and owner console save their respective session token in local storage on the UI origin, send it in `Authorization: Bearer`, and remove it on sign-out. Sessions remain revocable from the Owner console. API responses use `Access-Control-Allow-Origin: *` and do not allow credentialed cross-origin cookies. Keep the API on HTTPS and only publish the static pages on origins you trust.
+API-mode pages use non-cookie bearer sessions: they omit cross-origin cookies, save their respective session token in local storage on the configured UI origin, send it in `Authorization: Bearer`, and remove it on sign-out. Sessions remain revocable from the Owner console, with existing server-side authentication, authorization, CSRF, and permission checks still enforced. CORS does not allow credentials. Keep the API on HTTPS and only publish the static pages on origins you trust. Amazon S3 is not part of this deployment and is not used to host or proxy any Nightjar assets or data.
 
 For API-mode pages hosted separately, `APP_ORIGIN` must match the UI origin to allow embedding. API, proxy, and game endpoints remain served by the same Nightjar process and listener. Update the static files and `APP_ORIGIN` together when the UI host changes.
 
@@ -122,7 +122,7 @@ On first sign-in, API-mode browser pages also request the account's unique usern
 
 ## Tokens, ranks and sessions
 
-Each invitation allows one successful sign-in at a time; the owner can renew it from the Owner console to rotate its one-time value and permit another sign-in. The server increments its redemption count atomically and creates a server-side session record. The bundled same-origin UI uses an HttpOnly, SameSite cookie; separate-domain API-mode pages use a bearer token in the UI origin's local storage because wildcard CORS cannot use credentialed cookies. The session renews on authenticated requests and expires after 90 days without activity. Invitation expiry controls whether an unused token can be redeemed; it does not end a session that was already established. Revoking an invitation ends sessions created with that invitation. In the owner console, **Redeemed** means the invitation was accepted; it is not the same as a revoked invitation.
+Each invitation allows one successful sign-in at a time; the owner can renew it from the Owner console to rotate its one-time value and permit another sign-in. The server increments its redemption count atomically and creates a server-side session record. The bundled same-origin UI uses an HttpOnly, SameSite cookie; separate-domain API-mode pages use a bearer token in the UI origin's local storage and omit cookies on cross-origin requests. The session renews on authenticated requests and expires after 90 days without activity. Invitation expiry controls whether an unused token can be redeemed; it does not end a session that was already established. Revoking an invitation ends sessions created with that invitation. In the owner console, **Redeemed** means the invitation was accepted; it is not the same as a revoked invitation.
 
 Accounts may have multiple active sessions, so signing in on another device does not log out existing browsers. The Owner console lists sessions and can revoke each one independently. If a browser loses its cookie or its session expires, renew the invitation in the Owner console and use the new token to sign in again.
 
@@ -148,7 +148,7 @@ Each user's Project areas are private, account-owned organizational labels, not 
 
 Users with the support capability can send a request or suggestion from the in-app Help guide. Messages are stored in the Nightjar database and shown only in the owner’s **Support & ideas** panel; they are not emailed or sent to a third party. The owner can mark them open, in progress or resolved.
 
-The **Games** button opens a new Nightjar tab at `nightjar://games`; each selected game opens in its own tab at `nightjar://games/<id>`. The catalog comes from the HTTPS URL returned by `https://api.bearstool.com/gamelinks`; the browser fetches game HTML directly, preserves an existing `<base>` URL or adds one for relative assets, then writes the HTML into a sandboxed local player. Games do not use Rammerhead; cross-origin requests depend on the catalog service allowing browser access. The page also offers the original 60-second arithmetic sprint, which works locally and keeps only its personal-best score in that browser profile.
+The **Games** button opens a new Nightjar tab at `nightjar://games`; each selected game opens in its own tab at `nightjar://games/<id>`. The catalog comes from the HTTPS URL returned by `https://api.bearstool.com/gamelinks`; the browser fetches game HTML directly, preserves an existing `<base>` URL or adds one for relative assets, then writes the HTML into a sandboxed local player. Games do not use Rammerhead; cross-origin requests to the catalog service, catalog host, and game hosts depend on each service allowing browser access. Nightjar cannot change those remote CORS policies, and S3 cannot change them either; no generic proxy or S3 intermediary is used. The page also offers the original 60-second arithmetic sprint, which works locally and keeps only its personal-best score in that browser profile.
 
 ## Database, migrations and recovery
 
