@@ -3,9 +3,11 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createRequire } from "node:module";
 import { createHash, createHmac, randomBytes } from "node:crypto";
-import { createApp, isPublicAddress, restrictedLookup, runAdminCommand } from "../server.js";
+import { createApp, createRammerheadScriptCache, isPublicAddress, restrictedLookup, runAdminCommand } from "../server.js";
 
+const { updateScriptImportUrls } = createRequire(import.meta.url)("testcafe-hammerhead/lib/utils/url");
 const password = "a-strong-owner-password-for-tests";
 let app;
 let baseUrl;
@@ -14,6 +16,20 @@ let adminCsrf;
 let tempDirectory;
 const accountCredentials = new Map();
 const tokenAccounts = new Map();
+
+test("Rammerhead rewritten script cache returns stored rewrites", async () => {
+  const cache = createRammerheadScriptCache();
+  const script = 'import("https://proxy.example.test:4174/oldsession/https://cdn.example.test/module.js")';
+  await cache.set("original-script", script);
+  assert.equal(await cache.get("original-script"), script);
+  assert.equal(await cache.get("missing-script"), undefined);
+  const reused = updateScriptImportUrls(
+    await cache.get("original-script"),
+    { protocol: "https:", hostname: "proxy.example.test", port: 4174, crossDomainPort: 4174 },
+    "newsession",
+  );
+  assert.match(reused, /https:\/\/proxy\.example\.test:4174\/newsession\/https:\/\/cdn\.example\.test\/module\.js/);
+});
 
 const ollamaFetch = async (url, options = {}) => {
   assert.equal(options.redirect, "error");

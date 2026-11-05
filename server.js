@@ -33,6 +33,19 @@ const GUEST_SESSION_IDLE_MS = 10 * 60 * 1000;
 const GUEST_PROXY_REQUEST_LIMIT = 1200;
 const GUEST_PROXY_SOCKET_LIMIT = 24;
 
+export function createRammerheadScriptCache() {
+  const cache = new RammerheadJSMemCache(50 * 1024 * 1024);
+  return {
+    get(key) {
+      // RammerheadJSMemCache.get() forgets to return the LRU value.
+      return cache.lru.get(key);
+    },
+    set(key, value) {
+      return cache.set(key, value);
+    },
+  };
+}
+
 function sessionIdleLimitMs(session) {
   const sessionAgeMs = Date.parse(session.expires_at) - Date.parse(session.created_at);
   return session.principal === "admin" && sessionAgeMs > SESSION_MAX_AGE_MS
@@ -1175,7 +1188,7 @@ export async function createApp(options = {}) {
     crossDomainPort: null,
     dontListen: true,
     disableHttp2: true,
-    jsCache: new RammerheadJSMemCache(50 * 1024 * 1024),
+    jsCache: createRammerheadScriptCache(),
     getServerInfo(req) {
       const requestOrigin = new URL(`${req.socket.encrypted ? "https" : "http"}://${req.headers.host}`);
       const externalOrigin = configuredProxyOrigin ? new URL(configuredProxyOrigin) : requestOrigin;
