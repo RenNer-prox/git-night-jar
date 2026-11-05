@@ -4,7 +4,7 @@ const authMessage = document.querySelector("#bug-auth");
 const successMessage = document.querySelector("#bug-success");
 
 try {
-  const response = await fetch("/api/session", { credentials: "same-origin", cache: "no-store" });
+  const response = await fetch(apiUrl("/api/session"), { credentials: "include", cache: "no-store" });
   if (!response.ok) throw new Error("Sign in to Luma to submit a private bug report.");
   const session = await response.json();
   csrf = session.csrf;
@@ -20,9 +20,9 @@ form.addEventListener("submit", async (event) => {
   const button = $("button[type=submit]", form);
   button.disabled = true;
   try {
-    const response = await fetch("/api/feedback", {
+    const response = await fetch(apiUrl("/api/feedback"), {
       method: "POST",
-      credentials: "same-origin",
+      credentials: "include",
       cache: "no-store",
       headers: { Accept: "application/json", "Content-Type": "application/json", "X-NJ-CSRF": csrf },
       body: JSON.stringify({
@@ -45,4 +45,9 @@ form.addEventListener("submit", async (event) => {
 
 function $(selector, root = document) {
   return root.querySelector(selector);
+}
+
+function apiUrl(path) {
+  const base = window.LUMA_CONFIG?.apiBaseUrl || location.origin;
+  return new URL(path, base).toString();
 }

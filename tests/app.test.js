@@ -132,6 +132,7 @@ before(async () => {
     aiAutostart: false,
     desktopSecret: "a".repeat(64),
     dashboardOrigins: ["https://dashboard.example"],
+    corsOrigins: ["https://frontend.example"],
     userLoginLimit: 100,
     ollamaFetch,
     roundcubeUrl: "https://mail.example.test/roundcube",
@@ -1199,6 +1200,101 @@ test("Owner rank is server-authorized and the token dashboard never exposes secr
   assert.equal(preflight.status, 204);
   assert.equal(preflight.headers.get("access-control-allow-methods"), "GET, OPTIONS");
   assert.equal(preflight.headers.get("access-control-allow-origin"), "https://dashboard.example");
+
+  const frontendPreflight = await fetch(`${baseUrl}/api/owner/dashboard/tokens`, {
+    method: "OPTIONS",
+    headers: {
+      Origin: "https://frontend.example",
+      "Access-Control-Request-Method": "GET",
+      "Access-Control-Request-Headers": "content-type",
+    },
+  });
+  assert.equal(frontendPreflight.status, 204);
+  assert.equal(frontendPreflight.headers.get("access-control-allow-origin"), "https://frontend.example");
+  assert.equal(frontendPreflight.headers.get("access-control-allow-credentials"), "true");
+
+  const rejectedDashboardMethod = await fetch(`${baseUrl}/api/owner/dashboard/tokens`, {
+    method: "OPTIONS",
+    headers: {
+      Origin: "https://dashboard.example",
+      "Access-Control-Request-Method": "POST",
+    },
+  });
+  assert.equal(rejectedDashboardMethod.status, 403);
+});
+
+test("frontend CORS is exact-origin, credentialed, and preflight-limited", async () => {
+  const preflight = await fetch(`${baseUrl}/api/auth/login`, {
+    method: "OPTIONS",
+    headers: {
+      Origin: "https://frontend.example",
+      "Access-Control-Request-Method": "POST",
+      "Access-Control-Request-Headers": "content-type, x-nj-csrf",
+    },
+  });
+  assert.equal(preflight.status, 204);
+  assert.equal(preflight.headers.get("access-control-allow-origin"), "https://frontend.example");
+  assert.equal(preflight.headers.get("access-control-allow-credentials"), "true");
+  assert.equal(preflight.headers.get("vary"), "Origin");
+  assert.equal(preflight.headers.get("access-control-allow-methods"), "GET, POST, PUT, PATCH, DELETE, OPTIONS");
+  assert.equal(preflight.headers.get("access-control-allow-headers"), "Content-Type, X-NJ-CSRF");
+  assert.equal(preflight.headers.get("access-control-max-age"), "600");
+
+  const grant = await request("/api/browser/grant", {
+    method: "POST",
+    body: {},
+    origin: "https://frontend.example",
+  });
+  assert.equal(grant.response.status, 200, JSON.stringify(grant.data));
+  assert.equal(grant.response.headers.get("access-control-allow-origin"), "https://frontend.example");
+  assert.equal(grant.response.headers.get("access-control-allow-credentials"), "true");
+
+  const missingCsrf = await request("/api/admin/logout", {
+    method: "POST",
+    cookie: adminCookie,
+    body: {},
+    origin: "https://frontend.example",
+  });
+  assert.equal(missingCsrf.response.status, 403);
+  assert.equal(missingCsrf.data.code, "csrf_rejected");
+  assert.equal(missingCsrf.response.headers.get("access-control-allow-origin"), "https://frontend.example");
+
+  const rejectedOrigin = await fetch(`${baseUrl}/api/auth/login`, {
+    method: "OPTIONS",
+    headers: {
+      Origin: "https://attacker.example",
+      "Access-Control-Request-Method": "POST",
+      "Access-Control-Request-Headers": "content-type",
+    },
+  });
+  assert.equal(rejectedOrigin.status, 403);
+  assert.equal(rejectedOrigin.headers.get("access-control-allow-origin"), null);
+
+  const rejectedMethod = await fetch(`${baseUrl}/api/auth/login`, {
+    method: "OPTIONS",
+    headers: {
+      Origin: "https://frontend.example",
+      "Access-Control-Request-Method": "TRACE",
+    },
+  });
+  assert.equal(rejectedMethod.status, 403);
+
+  const rejectedHeader = await fetch(`${baseUrl}/api/auth/login`, {
+    method: "OPTIONS",
+    headers: {
+      Origin: "https://frontend.example",
+      "Access-Control-Request-Method": "POST",
+      "Access-Control-Request-Headers": "authorization",
+    },
+  });
+  assert.equal(rejectedHeader.status, 403);
+
+  await assert.rejects(createApp({
+    databasePath: join(tempDirectory, "wildcard-cors.sqlite"),
+    adminPassword: password,
+    corsOrigins: ["*"],
+    aiAutostart: false,
+  }), /CORS_ORIGINS/);
 });
 
 test("friends can be added one at a time without receiving admin access", async () => {

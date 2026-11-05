@@ -347,7 +347,16 @@ function hasRecognizedDomainSuffix(value) {
   }
 }
 
-function validateOrigin(req) {
+function isRequestOrigin(origin, req) {
+  try {
+    const parsed = new URL(origin);
+    return parsed.origin === origin && parsed.host === req.headers.host && ["http:", "https:"].includes(parsed.protocol);
+  } catch {
+    return false;
+  }
+}
+
+function validateOrigin(req, allowedOrigins = new Set()) {
   const origin = req.headers.origin;
   if (!origin) return;
   let parsed;
@@ -356,7 +365,8 @@ function validateOrigin(req) {
   } catch {
     throw new HttpError(403, "Request origin was rejected.", "origin_rejected");
   }
-  if (parsed.host !== req.headers.host || !["http:", "https:"].includes(parsed.protocol)) {
+  if (parsed.origin !== origin || !["http:", "https:"].includes(parsed.protocol) ||
+      (parsed.host !== req.headers.host && !allowedOrigins.has(origin))) {
     throw new HttpError(403, "Request origin was rejected.", "origin_rejected");
   }
 }
@@ -1074,6 +1084,11 @@ export async function createApp(options = {}) {
   const proxyHost = options.proxyHost ?? env("RAMMERHEAD_HOST", env("SCRAMJET_HOST", "127.0.0.1"));
   const configuredProxyOrigin = options.proxyOrigin ?? env("RAMMERHEAD_ORIGIN", env("SCRAMJET_ORIGIN", ""));
   const configuredAppOrigin = options.appOrigin ?? env("APP_ORIGIN", "");
+  const configuredCorsOrigins = options.corsOrigins ?? env("CORS_ORIGINS", "");
+  const corsOriginsInput = Array.isArray(configuredCorsOrigins)
+    ? configuredCorsOrigins
+    : String(configuredCorsOrigins).split(",");
+  const corsOrigins = new Set(corsOriginsInput.map((origin) => String(origin).trim()).filter(Boolean));
   const configuredDashboardOrigins = options.dashboardOrigins ?? env("DASHBOARD_ORIGINS", "");
   const dashboardOriginsInput = Array.isArray(configuredDashboardOrigins)
     ? configuredDashboardOrigins
@@ -1102,6 +1117,16 @@ export async function createApp(options = {}) {
     } catch {
       db.close();
       throw new Error("DASHBOARD_ORIGINS must be a comma-separated list of exact HTTP(S) origins; production origins must use HTTPS.");
+    }
+  }
+  for (const value of corsOrigins) {
+    try {
+      const parsed = new URL(value);
+      if (!["http:", "https:"].includes(parsed.protocol) || parsed.origin !== value || value === "*") throw new Error();
+      if ((options.production ?? env("NODE_ENV", "development") === "production") && parsed.protocol !== "https:") throw new Error();
+    } catch {
+      db.close();
+      throw new Error("CORS_ORIGINS must be a comma-separated list of exact HTTP(S) origins; production origins must use HTTPS.");
     }
   }
   if ((options.production ?? env("NODE_ENV", "development") === "production") && !configuredProxyOrigin) {
@@ -1747,7 +1772,10 @@ export async function createApp(options = {}) {
 
     if (method === "GET" && path === "/api/owner/dashboard/tokens") {
       requireOwner(session);
-      if (req.headers.origin && !dashboardOrigins.has(req.headers.origin)) {
+      if (req.headers.origin &&
+          !dashboardOrigins.has(req.headers.origin) &&
+          !corsOrigins.has(req.headers.origin) &&
+          !isRequestOrigin(req.headers.origin, req)) {
         throw new HttpError(403, "This dashboard origin is not configured.", "origin_rejected");
       }
       const rows = db.prepare(`SELECT id, rank, expires_at, usage_limit, usage_count, ai_usage_count, created_at, revoked_at
@@ -1782,7 +1810,7 @@ export async function createApp(options = {}) {
     }
 
     if (method === "POST" && path === "/api/auth/basic-signup") {
-      validateOrigin(req);
+      validateOrigin(req, corsOrigins);
       consumeLimit(`basic-signup:${ip}`, 5, 24 * 60 * 60_000);
       const body = await readBody(req);
       const label = typeof body.label === "string" ? body.label.trim() : "";
@@ -1836,7 +1864,7 @@ export async function createApp(options = {}) {
     }
 
     if (method === "POST" && path === "/api/auth/email-login") {
-      validateOrigin(req);
+      validateOrigin(req, corsOrigins);
       consumeLimit(`email-login:${ip}`, userLoginLimit, 5 * 60_000);
       const body = await readBody(req);
       const email = typeof body.email === "string" ? body.email.trim().toLowerCase() : "";
@@ -1870,7 +1898,7 @@ export async function createApp(options = {}) {
     }
 
     if (method === "POST" && path === "/api/auth/login") {
-      validateOrigin(req);
+      validateOrigin(req, corsOrigins);
       consumeLimit(`user:${ip}`, userLoginLimit, 5 * 60_000);
       const body = await readBody(req);
       if (typeof body.token !== "string" || body.token.length < 24 || body.token.length > 128) {
@@ -2262,7 +2290,7 @@ export async function createApp(options = {}) {
     }
 
     if (method === "POST" && path === "/api/admin/login") {
-      validateOrigin(req);
+      validateOrigin(req, corsOrigins);
       consumeLimit(`admin:${ip}`, 6, 10 * 60_000);
       const body = await readBody(req);
       const currentOwner = db.prepare("SELECT * FROM owner WHERE id = 1").get();
@@ -2281,7 +2309,7 @@ export async function createApp(options = {}) {
     }
 
     if (method === "POST" && path === "/api/browser/grant") {
-      validateOrigin(req);
+      validateOrigin(req, corsOrigins);
       if (!req.headers.origin) throw new HttpError(403, "A same-origin browser request is required.", "origin_rejected");
       const guest = !session || session.principal !== "user";
       if (guest) {
@@ -2313,7 +2341,7 @@ export async function createApp(options = {}) {
     }
 
     if (method === "POST" && path === "/api/browser/adopt") {
-      validateOrigin(req);
+      validateOrigin(req, corsOrigins);
       const user = requirePrincipal(session, "user");
       requirePermission(user, "browse");
       requireCsrf(req, session);
@@ -3456,7 +3484,9 @@ export async function createApp(options = {}) {
     if (url.pathname !== "/api/owner/dashboard/tokens") return false;
     const origin = req.headers.origin;
     if (origin) {
-      if (!dashboardOrigins.has(origin)) throw new HttpError(403, "This dashboard origin is not configured.", "origin_rejected");
+      if (!dashboardOrigins.has(origin) && !corsOrigins.has(origin) && !isRequestOrigin(origin, req)) {
+        throw new HttpError(403, "This dashboard origin is not configured.", "origin_rejected");
+      }
       res.setHeader("Access-Control-Allow-Origin", origin);
       res.setHeader("Access-Control-Allow-Credentials", "true");
       res.setHeader("Vary", "Origin");
@@ -3464,6 +3494,9 @@ export async function createApp(options = {}) {
     res.setHeader("Cache-Control", "no-store");
     if (req.method !== "OPTIONS") return false;
     if (!origin) throw new HttpError(403, "A configured dashboard origin is required.", "origin_rejected");
+    if ((req.headers["access-control-request-method"] ?? "").toUpperCase() !== "GET") {
+      throw new HttpError(403, "The dashboard preflight requested an unsupported method.", "method_rejected");
+    }
     const requestedHeaders = (req.headers["access-control-request-headers"] ?? "")
       .split(",").map((header) => header.trim().toLowerCase()).filter(Boolean);
     if (requestedHeaders.some((header) => !["content-type"].includes(header))) {
@@ -3477,11 +3510,39 @@ export async function createApp(options = {}) {
     return true;
   }
 
+  function handleApiCors(req, res, url) {
+    if (!url.pathname.startsWith("/api/") || url.pathname === "/api/owner/dashboard/tokens") return false;
+    const origin = req.headers.origin;
+    if (!origin || isRequestOrigin(origin, req)) return false;
+    if (!corsOrigins.has(origin)) throw new HttpError(403, "This frontend origin is not configured.", "origin_rejected");
+    res.setHeader("Access-Control-Allow-Origin", origin);
+    res.setHeader("Access-Control-Allow-Credentials", "true");
+    res.setHeader("Vary", "Origin");
+    if (req.method !== "OPTIONS") return false;
+    const allowedMethods = ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"];
+    const requestedMethod = (req.headers["access-control-request-method"] ?? "").toUpperCase();
+    if (!allowedMethods.includes(requestedMethod)) {
+      throw new HttpError(403, "The preflight requested an unsupported method.", "method_rejected");
+    }
+    const requestedHeaders = (req.headers["access-control-request-headers"] ?? "")
+      .split(",").map((header) => header.trim().toLowerCase()).filter(Boolean);
+    if (requestedHeaders.some((header) => !["content-type", "x-nj-csrf"].includes(header))) {
+      throw new HttpError(403, "The preflight requested an unsupported header.", "headers_rejected");
+    }
+    res.setHeader("Access-Control-Allow-Methods", allowedMethods.join(", "));
+    if (requestedHeaders.length) res.setHeader("Access-Control-Allow-Headers", "Content-Type, X-NJ-CSRF");
+    res.setHeader("Access-Control-Max-Age", "600");
+    res.statusCode = 204;
+    res.end();
+    return true;
+  }
+
   async function route(req, res) {
     const start = Date.now();
     const url = new URL(req.url, "http://nightjar.local");
     try {
       if (handleDashboardCors(req, res, url)) return;
+      if (handleApiCors(req, res, url)) return;
       if (await routeDesktopCompanion(req, res, url)) {
         return;
       } else if (url.pathname.startsWith("/api/")) {

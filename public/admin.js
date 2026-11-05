@@ -8,6 +8,11 @@ function esc(value = "") {
   })[char]);
 }
 
+function apiUrl(path) {
+  const base = window.LUMA_CONFIG?.apiBaseUrl || location.origin;
+  return new URL(path, base).toString();
+}
+
 function renderFriends() {
   const root = $("#friend-list");
   if (!state.friends.length) {
@@ -60,7 +65,7 @@ async function api(path, options = {}) {
   if (!["GET", "HEAD"].includes(method) && state.csrf) headers["X-NJ-CSRF"] = state.csrf;
   let response;
   try {
-    response = await fetch(path, { method, headers, credentials: "same-origin", cache: "no-store", body: options.body === undefined ? undefined : JSON.stringify(options.body) });
+    response = await fetch(apiUrl(path), { method, headers, credentials: "include", cache: "no-store", body: options.body === undefined ? undefined : JSON.stringify(options.body) });
   } catch {
     throw new Error("Cannot reach Luma. Check the service connection.");
   }
@@ -408,9 +413,9 @@ async function companionRequest(path, { body } = {}) {
   if (body !== undefined && state.csrf) headers["X-NJ-CSRF"] = state.csrf;
   let response;
   try {
-    response = await fetch(desktopRelayPaths[path], {
+    response = await fetch(apiUrl(desktopRelayPaths[path]), {
       method: body === undefined ? "GET" : "POST",
-      credentials: "same-origin",
+      credentials: "include",
       cache: "no-store",
       headers,
       body: body === undefined ? undefined : JSON.stringify(body),
@@ -564,7 +569,7 @@ async function openDesktopViewer() {
   try {
     setDesktopMessage("Creating a one-time tab for this authenticated owner session…");
     const { url } = await api("/api/admin/desktop/viewer-ticket", { method: "POST", body: {} });
-    viewer.location.replace(`${url}#${encodeURIComponent(launchId)}`);
+    viewer.location.replace(`${apiUrl(url)}#${encodeURIComponent(launchId)}`);
     setDesktopMessage("The one-time desktop tab is opening. The tab must keep this owner session and cannot be reopened from its URL.");
   } catch (error) {
     clearHandshake();

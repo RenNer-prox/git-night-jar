@@ -668,10 +668,10 @@ async function api(path, options = {}) {
   if (!["GET", "HEAD"].includes(method) && state.csrf) headers["X-NJ-CSRF"] = state.csrf;
   let response;
   try {
-    response = await fetch(path, {
+    response = await fetch(apiUrl(path), {
       method,
       headers,
-      credentials: "same-origin",
+      credentials: "include",
       cache: "no-store",
       body: options.body === undefined ? undefined : JSON.stringify(options.body),
     });
@@ -684,6 +684,11 @@ async function api(path, options = {}) {
     throw new Error(data.error ?? "The request could not be completed.");
   }
   return data;
+}
+
+function apiUrl(path) {
+  const base = window.LUMA_CONFIG?.apiBaseUrl || location.origin;
+  return new URL(path, base).toString();
 }
 
 async function refreshBookmarks(showErrors = true) {
@@ -1014,7 +1019,7 @@ function openAssistant() {
     title: "Local assistant",
     subtitle: "Your conversation stays on this machine.",
     wide: true,
-    content: `<div class="assistant-dialog"><div class="assistant-status"><span class="status-dot" style="background:${ready ? "var(--green)" : "var(--accent)"}"></span><span>${escapeHtml(status)}</span>${ready ? "" : '<button id="ai-check" class="text-button" type="button">Check again</button>'}</div><div id="assistant-messages" class="assistant-messages"></div><p id="assistant-error" class="assistant-error" hidden></p><form id="assistant-form" class="assistant-composer"><textarea name="prompt" rows="1" maxlength="8000" aria-label="Message local assistant" placeholder="${ready ? "Ask a question…" : "Ollama is starting or the model is not installed…"}" ${ready ? "" : "disabled"}></textarea><button class="assistant-send" type="submit" aria-label="Send message" title="Send message" ${ready ? "" : "disabled"}>↑</button></form><div class="assistant-model-note">${escapeHtml(ai?.reason || "Requests go only to Ollama at 127.0.0.1:11434. No web search or tool access.")}</div></div>`,
+    content: `<div class="assistant-dialog"><div class="assistant-status"><span class="status-dot" style="background:${ready ? "var(--green)" : "var(--accent)"}"></span><span>${escapeHtml(status)}</span>${ready ? "" : '<button id="ai-check" class="text-button" type="button">Check again</button>'}</div><div id="assistant-messages" class="assistant-messages"></div><p id="assistant-error" class="assistant-error" hidden></p><form id="assistant-form" class="assistant-composer"><textarea name="prompt" rows="1" maxlength="8000" aria-label="Message local assistant" placeholder="${ready ? "Ask a question…" : "Ollama is starting or the model is not installed…"}" ${ready ? "" : "disabled"}></textarea><button class="assistant-send" type="submit" aria-label="Send message" title="Send message" ${ready ? "" : "disabled"}>↑</button></form><div class="assistant-model-note">${escapeHtml(ai?.reason || "Requests go only to the server's configured local Ollama service. No web search or tool access.")}</div></div>`,
     footer: `<span class="muted" style="font-size:9px">Conversation is not saved.</span><div class="dialog-footer-right"><button id="clear-assistant" class="secondary-button" type="button">Clear conversation</button><button class="secondary-button" data-close-dialog type="button">Close</button></div>`,
   });
   renderAssistantMessages();
@@ -1062,9 +1067,9 @@ async function sendAssistantMessage(prompt) {
   state.assistantConversation.push(answer);
   renderAssistantMessages();
   try {
-    const response = await fetch("/api/ai/chat", {
+    const response = await fetch(apiUrl("/api/ai/chat"), {
       method: "POST",
-      credentials: "same-origin",
+      credentials: "include",
       cache: "no-store",
       signal: abort.signal,
       headers: { "Content-Type": "application/json", Accept: "text/event-stream", "X-NJ-CSRF": state.csrf },
@@ -1338,7 +1343,7 @@ async function openStorage() {
   try { result = await api("/api/storage"); }
   catch (error) { return toast(error.message); }
   const render = () => {
-    const list = result.items.length ? result.items.map((item) => `<article class="workspace-item"><div><strong>${escapeHtml(item.name)}</strong><p>${(item.size / 1024).toFixed(1)} KB · ${escapeHtml(item.type)}</p></div><div class="workspace-item-actions"><a class="text-button" href="/api/storage/${item.id}/download">Download</a><button class="text-button danger-text" type="button" data-delete-file="${item.id}">Delete</button></div></article>`).join("") : '<p class="muted">No files uploaded yet.</p>';
+    const list = result.items.length ? result.items.map((item) => `<article class="workspace-item"><div><strong>${escapeHtml(item.name)}</strong><p>${(item.size / 1024).toFixed(1)} KB · ${escapeHtml(item.type)}</p></div><div class="workspace-item-actions"><a class="text-button" href="${escapeHtml(apiUrl(`/api/storage/${item.id}/download`))}">Download</a><button class="text-button danger-text" type="button" data-delete-file="${item.id}">Delete</button></div></article>`).join("") : '<p class="muted">No files uploaded yet.</p>';
     openDialog({
       title: "Luma cloud storage",
       subtitle: `${(result.usedBytes / 1024 / 1024).toFixed(2)} MB of ${(result.quotaBytes / 1024 / 1024).toFixed(0)} MB used · up to 1 MB per file`,

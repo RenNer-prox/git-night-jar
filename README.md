@@ -129,10 +129,11 @@ Create custom ranks with `ranks create "Study group" --permissions browse,games,
 | `PORT` | `4173` | Luma app port. |
 | `RAMMERHEAD_HOST` | `127.0.0.1` | Rammerhead bind address. |
 | `RAMMERHEAD_PORT` | `4174` | Rammerhead service port. |
-| `APP_ORIGIN` | inferred for local development | Exact public Luma origin allowed to embed the Rammerhead shell. Required in production. |
+| `APP_ORIGIN` | inferred for local development | Exact public frontend origin allowed to embed the separate Rammerhead shell. For S3, use the frontend's HTTPS custom domain. Required in production. |
 | `RAMMERHEAD_ORIGIN` | local origin from host/port | Exact public Rammerhead origin, with no path. Required in production. It must be different from `APP_ORIGIN`. |
 | `NODE_ENV` | `development` | Set to `production` behind HTTPS; production cookies use `Secure`. |
 | `DATABASE_PATH` | `./data/nightjar.sqlite` | SQLite database path. |
+| `CORS_ORIGINS` | unset | Optional comma-separated exact frontend origins allowed to call the API with credentials. No wildcard; production origins must use HTTPS. |
 | `DASHBOARD_ORIGINS` | unset | Optional comma-separated exact dashboard origins allowed to make credentialed cross-origin token-dashboard requests. No wildcard; production origins must be HTTPS. |
 | `ADMIN_INITIAL_PASSWORD` | unset | Required to initialize a new owner database; minimum 16 characters. |
 | `ADMIN_TOTP_SECRET` | unset | Optional base32 RFC 6238 TOTP secret. |
@@ -165,7 +166,23 @@ For a systemd-managed Caddy service, persist `APP_DOMAIN` in a systemd service o
 
 ### Amazon S3 and Jellyfin
 
-Luma's current storage feature uses account-isolated SQLite files on the app server; it does not upload to Amazon S3. No S3 browser CORS policy is added. A server-side S3 integration would need the bucket name, AWS region, private server credentials/IAM permissions, and a requested upload limit; direct browser-to-S3 uploads would additionally require a narrowly scoped bucket CORS policy allowing only the Luma app origin, never the Rammerhead proxy origin.
+The Luma web frontend can be hosted as static files on S3; this does not move or replace the Node backend, SQLite database, or Rammerhead proxy. Build a static bundle with the public HTTPS backend origin:
+
+```sh
+LUMA_API_ORIGIN=https://api.example.com npm run build:static
+```
+
+The command writes only frontend assets and `api-config.js` to `api-html/`. It requires an explicit bare HTTPS origin, so the generated config does not silently point at localhost or an unknown host. Upload the **contents** of `api-html/` to the bucket root. The bundle contains the browser, owner-console, and bug-report pages and their CSS/JS/SVG assets; it does not contain the backend, proxy shell, desktop companion, `.env`, or server secrets. Rebuild with the correct API origin before each deployment; do not upload a bundle whose generated `api-config.js` still has a sample origin.
+
+For production, keep the S3 bucket private and serve it through CloudFront with Origin Access Control (OAC); block public bucket access and grant the distribution access to read objects. Set the default root object to `index.html`. Associate a viewer-request CloudFront Function that rewrites `/admin` to `/admin.html` and `/bugs` to `/bugs.html`; keep ordinary asset paths unchanged. Configure an HTTPS custom domain such as `app.example.com`. Run the backend separately at `api.example.com` and the Rammerhead service at a distinct origin such as `proxy.example.com`; all must be deployed and reachable independently.
+
+Set the backend environment to `APP_ORIGIN=https://app.example.com` and `CORS_ORIGINS=https://app.example.com`, plus the exact `RAMMERHEAD_ORIGIN`. If the separate token-dashboard endpoint is used cross-origin, also add the frontend origin to `DASHBOARD_ORIGINS`. These are exact origin allowlists: do not use `*`. The API returns credentialed CORS only to configured origins, handles preflight for the app's methods and `Content-Type`/`X-NJ-CSRF` headers, and preserves session/CSRF checks. Keep the frontend and API on HTTPS subdomains of the same registrable domain: the existing `SameSite=Strict` host-only session cookies are not available to an unrelated S3/CloudFront domain. An unrelated static domain or the default `cloudfront.net` hostname is therefore not a supported authenticated deployment origin.
+
+Attach a CloudFront response-headers policy for static documents with a restrictive CSP similar to `default-src 'self'; base-uri 'self'; object-src 'none'; form-action 'self'; frame-ancestors 'none'; frame-src https://proxy.example.com; img-src 'self' data: https:; font-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' https://api.example.com`, plus `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, and `Referrer-Policy: no-referrer`. Replace both example origins with the deployed origins. `frame-src` is for the separately hosted Rammerhead shell; the backend itself remains non-embeddable. CORS only permits browser API requests—it does not enable iframe embedding. Luma does not try to iframe the backend or raw backend site. The current browsing workspace does use its separate Rammerhead shell; pages whose own framing/security behavior prevents proxy display may remain unsupported and cannot be fixed by CORS.
+
+No S3 bucket CORS rule is needed for the static assets because the browser fetches them from the frontend origin and calls the separate API origin directly. Do not add a wildcard CORS response header at S3 or CloudFront. Configure the API's exact `CORS_ORIGINS` allowlist instead. CloudFront can cache static assets normally, but use a disabled/very short cache policy for `api-config.js` or invalidate that object after changing the backend origin. S3 hosting does not run Node, Rammerhead, or backend functions. The current one-time desktop viewer depends on the authenticated backend page and same-origin popup handshake; use the backend-hosted UI or a same-origin reverse proxy for that optional companion feature.
+
+Luma's account storage feature still uses account-isolated SQLite files on the app server; it does not upload user files to S3. A future server-side S3 integration would require a bucket, region, private server credentials/IAM permissions, and an upload limit. Direct browser-to-S3 uploads would additionally need a narrowly scoped bucket CORS policy for only the exact Luma origin and required methods/headers; none is configured here.
 
 There is no Jellyfin integration or CORS proxy configured. To connect it safely would require a reachable HTTPS Jellyfin base URL, the intended media feature, and a Jellyfin API key stored only in server-side secret configuration. Add only the exact Luma app origin (for example `https://example.com`) to Jellyfin's CORS allowed-origin setting; do not allow `*`, the Rammerhead origin, or arbitrary request origins. The deployment script does not configure Jellyfin or transmit credentials.
 
@@ -221,7 +238,7 @@ Run:
 npm test
 ```
 
-The tests use a temporary SQLite database and mock local Ollama responses; they do not download a model or generate model output. They cover anonymous guest browsing and guest-to-token session adoption, account/private API isolation, Owner-rank authorization and dashboard CORS/secrecy, friend list isolation, private project areas, token-scoped Basic AI quotas, customization permissions, rank migrations, token hashing/one-time redemption, sessions, proxy isolation, bookmarks/history/settings, and TOTP.
+The tests use a temporary SQLite database and mock local Ollama responses; they do not download a model or generate model output. They cover anonymous guest browsing and guest-to-token session adoption, account/private API isolation, Owner-rank authorization and dashboard/API CORS (including preflight and credential policy), static S3 bundle layout/configuration, friend list isolation, private project areas, token-scoped Basic AI quotas, customization permissions, rank migrations, token hashing/one-time redemption, sessions, proxy isolation, bookmarks/history/settings, and TOTP.
 
 - **Port already in use:** another Luma instance may already be running. Do not start a second copy; stop the existing instance from its own terminal or change both `PORT` and `APP_ORIGIN`, and both `RAMMERHEAD_PORT` and `RAMMERHEAD_ORIGIN`.
 - **Rammerhead page does not open:** check the Luma log for “Rammerhead browsing engine is ready”, confirm `RAMMERHEAD_PORT` is reachable from the browser, and ensure the app and proxy have distinct origins. Some sites remain incompatible with web-based proxying.
