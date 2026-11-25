@@ -85,7 +85,7 @@ const state = {
   gameTimer: 0,
   game: null,
 };
-const GAMES_LINKS_URL = "https://api.bearstool.com/gamelinks";
+const GAMES_LINKS_URL = "Find you own. Im done providing for you.";
 const GAMES_PAGE_SIZE = 60;
 state.apiToken = API_MODE ? localStorage.getItem(API_SESSION_KEY) ?? "" : "";
 const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
