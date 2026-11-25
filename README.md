@@ -112,7 +112,7 @@ For a Cloudflare Tunnel on the same host, use one ingress rule from the Nightjar
 
 ### Separate-domain API UI
 
-The `api-html` directory contains static copies of the browser and owner-console pages. Host those HTML files on a separate HTTPS site; their API-base meta tag and asset URLs are currently set to `https://p-tunnel-encrypted3.bearstool.com/`. Change those values in both HTML files when using another API host. The JavaScript and CSS are served from the API host, which permits wildcard CORS for static assets and API responses.
+The `api-html` directory contains static copies of the browser and owner-console pages. Host those HTML files on a separate HTTPS site; their API-base meta tag and asset URLs are currently set to `Removed per BTLS-POLICY. Takedown by z6.z4`. Change those values in both HTML files when using another API host. The JavaScript and CSS are served from the API host, which permits wildcard CORS for static assets and API responses.
 
 API-mode pages use non-cookie bearer sessions because wildcard CORS cannot be combined with credentialed cookies. The browser and owner console save their respective session token in local storage on the UI origin, send it in `Authorization: Bearer`, and remove it on sign-out. Sessions remain revocable from the Owner console. API responses use `Access-Control-Allow-Origin: *` and do not allow credentialed cross-origin cookies. Keep the API on HTTPS and only publish the static pages on origins you trust.
 
@@ -148,7 +148,7 @@ Each user's Project areas are private, account-owned organizational labels, not 
 
 Users with the support capability can send a request or suggestion from the in-app Help guide. Messages are stored in the Nightjar database and shown only in the owner’s **Support & ideas** panel; they are not emailed or sent to a third party. The owner can mark them open, in progress or resolved.
 
-The **Games** button opens a new Nightjar tab at `nightjar://games`; each selected game opens in its own tab at `nightjar://games/<id>`. The catalog comes from the HTTPS URL returned by `https://api.bearstool.com/gamelinks`; the browser fetches game HTML directly, preserves an existing `<base>` URL or adds one for relative assets, then writes the HTML into a sandboxed local player. Games do not use Rammerhead; cross-origin requests depend on the catalog service allowing browser access. The page also offers the original 60-second arithmetic sprint, which works locally and keeps only its personal-best score in that browser profile.
+The **Games** button opens a new Nightjar tab at `nightjar://games`; each selected game opens in its own tab at `nightjar://games/<id>`. The catalog comes from the HTTPS URL returned by `Removed per BTLS-POLICY. Takedown by z6.z4`; the browser fetches game HTML directly, preserves an existing `<base>` URL or adds one for relative assets, then writes the HTML into a sandboxed local player. Games do not use Rammerhead; cross-origin requests depend on the catalog service allowing browser access. The page also offers the original 60-second arithmetic sprint, which works locally and keeps only its personal-best score in that browser profile.
 
 ## Database, migrations and recovery
 
